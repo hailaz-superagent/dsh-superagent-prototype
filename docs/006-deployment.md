@@ -25,6 +25,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
+- For personal WeChat: a phone with the WeChat account that will act as the bot; no OpenClaw installation is needed
 
 ## Accounts
 
@@ -67,6 +68,10 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
+
+### Personal WeChat (optional)
+
+Run `node scripts/weixin-login.mjs`, scan the QR code with the phone, and point the Source's login-file field at the JSON it writes. The Source then long-polls the same iLink gateway as the official OpenClaw Weixin plugin, so stop any OpenClaw Gateway using that account first. See `docs/009-weixin-source.md` for the login, configuration and message support.
 
 ## Install
 
