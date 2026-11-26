@@ -119,11 +119,12 @@ function mediaRef(item: { media?: { encrypt_query_param?: string; aes_key?: stri
   }
 }
 
-function imageRef(item: { media?: { encrypt_query_param?: string; aes_key?: string; full_url?: string }; aeskey?: string },
+function imageRef(item: { media?: { encrypt_query_param?: string; aes_key?: string; full_url?: string }; aeskey?: string; url?: string },
   index: number, markerLabel?: string): WeixinMediaRef {
   const ref = mediaRef(item, 'image', index, markerLabel)
-  if (item.aeskey) return { ...ref, aeskey: item.aeskey, keyEncoding: 'hex' }
-  return ref
+  const withUrl = !ref.url && item.url ? { ...ref, url: item.url } : ref
+  if (item.aeskey) return { ...withUrl, aeskey: item.aeskey, keyEncoding: 'hex' }
+  return withUrl
 }
 
 function itemText(item: NonNullable<WeixinMessage['item_list']>[number]): string | undefined {
@@ -255,9 +256,7 @@ export function plainWeixinText(text: string): string {
     .replace(/`([^`]+)`/g, '$1')
     .replace(/^\s{0,3}#{1,6}\s+/gm, '')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
     .replace(/\*([^*\n]+)\*/g, '$1')
-    .replace(/_([^_\n]+)_/g, '$1')
 }
 
 const channel: SourceChannel<WeixinConfig> = {
@@ -285,9 +284,10 @@ export function weixinCredentials(config: WeixinConfig, stateDir: string): Weixi
   }
   const token = (file?.token ?? config.token).trim()
   if (!token) return undefined
+  const base = (file?.baseUrl?.trim() || config.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')
   return {
     token,
-    baseUrl: file?.baseUrl?.trim() || config.baseUrl || DEFAULT_BASE_URL,
+    baseUrl: /^https?:\/\//.test(base) ? base : `https://${base}`,
     ...config.accountId || file?.accountId ? { accountId: config.accountId || file?.accountId } : {},
   }
 }

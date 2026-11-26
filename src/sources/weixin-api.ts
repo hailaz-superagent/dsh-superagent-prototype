@@ -134,7 +134,8 @@ function deadline(signal: AbortSignal | undefined, ms: number): { signal: AbortS
 
 async function post(cred: WeixinCredentials, endpoint: string, body: unknown, signal: AbortSignal | undefined,
   timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
-  const url = new URL(endpoint, cred.baseUrl.endsWith('/') ? cred.baseUrl : `${cred.baseUrl}/`)
+  const base = /^https?:\/\//.test(cred.baseUrl) ? cred.baseUrl : `https://${cred.baseUrl}`
+  const url = new URL(endpoint, base.endsWith('/') ? base : `${base}/`)
   const wait = deadline(signal, timeoutMs)
   try {
     const response = await fetch(url, {
