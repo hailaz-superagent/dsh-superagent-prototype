@@ -1,14 +1,20 @@
 /** WeCom long connection: Trigger mapping, reply routing, runner lifecycle, and the real SDK adapter. */
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Health } from '../src/sources/host.ts'
 import type { OutboundMessage, Trigger } from '../src/core/index.ts'
 import type { WecomConfig } from '../src/sources/wecom.ts'
 import { WecomConfigSchema } from '../src/sources/wecom.ts'
 import {
-  LIVE_TRANSPORT, liveMessageText, liveTrigger, sendLiveReply, setLiveBot, sdkLiveBot, startLive,
+  LIVE_TRANSPORT, liveMessageText, liveMessageParts, liveTrigger, sendLiveReply, setLiveBot, sdkLiveBot, startLive,
   type LiveBot, type LiveFrame,
 } from '../src/sources/wecom-live.ts'
+import { liveImageType, readLiveWecomImage } from '../src/sources/wecom-live-image.ts'
 import { SOURCE, wecomTriggerId } from '../src/sources/wecom-shared.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -19,6 +25,8 @@ const MESSAGE = {
 }
 const FRAME: LiveFrame = { headers: { req_id: 'req-1' }, body: MESSAGE }
 const CONFIG: WecomConfig = WecomConfigSchema.parse({ mode: 'live', botId: 'bot-1', secret: 'secret-1' })
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d])
 
 const servers: WebSocketServer[] = []
 afterEach(async () => {
@@ -32,7 +40,8 @@ afterEach(async () => {
 interface FakeBot extends LiveBot {
   readonly replies: { requestId: string; body: Record<string, unknown> }[]
   readonly sends: { chatId: string; body: Record<string, unknown> }[]
-  readonly state: { connected: boolean; connects: number; disconnects: number }
+  readonly downloads: { url: string; aesKey?: string }[]
+  readonly state: { connected: boolean; connects: number; disconnects: number; download: 'ok' | 'fail' }
   authenticated(): void
   disconnected(reason?: string): void
   failed(error: unknown): void
@@ -44,12 +53,13 @@ function fakeBot(): FakeBot {
   let onDisconnected: ((reason: string) => void) | undefined
   let onError: ((error: unknown) => void) | undefined
   let onMessage: ((frame: LiveFrame) => void) | undefined
-  const state = { connected: false, connects: 0, disconnects: 0 }
+  const state = { connected: false, connects: 0, disconnects: 0, download: 'ok' as 'ok' | 'fail' }
   const replies: { requestId: string; body: Record<string, unknown> }[] = []
   const sends: { chatId: string; body: Record<string, unknown> }[] = []
+  const downloads: { url: string; aesKey?: string }[] = []
   return {
     get connected() { return state.connected },
-    state, replies, sends,
+    state, replies, sends, downloads,
     onAuthenticated(handler) { onAuthenticated = handler },
     onDisconnected(handler) { onDisconnected = handler },
     onError(handler) { onError = handler },
@@ -58,6 +68,11 @@ function fakeBot(): FakeBot {
     disconnect() { state.disconnects += 1; state.connected = false },
     async reply(requestId, body) { replies.push({ requestId, body }) },
     async sendMessage(chatId, body) { sends.push({ chatId, body }) },
+    async downloadFile(url, aesKey) {
+      downloads.push({ url, ...(aesKey ? { aesKey } : {}) })
+      if (state.download === 'fail') throw new Error('download failed')
+      return { buffer: PNG, filename: 'photo.png' }
+    },
     authenticated() { onAuthenticated?.() },
     disconnected(reason = 'network') { state.connected = false; onDisconnected?.(reason) },
     failed(error) { onError?.(error) },
@@ -65,7 +80,7 @@ function fakeBot(): FakeBot {
   }
 }
 
-function context(config: WecomConfig = CONFIG): {
+function context(config: WecomConfig = CONFIG, deployment = testDeployment()): {
   ctx: Parameters<typeof startLive>[0]
   received: Trigger[]
   reports: Health[]
@@ -73,7 +88,7 @@ function context(config: WecomConfig = CONFIG): {
   const received: Trigger[] = []
   const reports: Health[] = []
   const ctx = {
-    deployment: testDeployment(),
+    deployment,
     commands: {},
     ready: Promise.resolve(),
     configured: () => true,
@@ -137,15 +152,19 @@ describe('WeCom long-connection Trigger', () => {
         { msgtype: 'text', text: { content: '第二行' } },
       ] },
     } })!
-    expect(mixed.text).toBe('第一行\n第二行')
+    expect(mixed.text).toBe('第一行\n[图片] img_wecom_0\n第二行')
     expect(liveMessageText({
       msgid: 'v', chattype: 'single', from: { userid: 'alice' }, msgtype: 'voice', voice: { content: '语音转写' },
     })).toBe('语音转写')
     expect(liveMessageText({
-      msgid: 'i', chattype: 'single', from: { userid: 'alice' }, msgtype: 'image', image: { url: 'x' },
-    })).toBeUndefined()
-    expect(liveTrigger({ headers: { req_id: 'req-4' }, body: { ...MESSAGE, msgtype: 'image', image: { url: 'x' } } }))
-      .toBeUndefined()
+      msgid: 'i', chattype: 'single', from: { userid: 'alice' }, msgtype: 'image', image: { url: 'https://example.invalid/i' },
+    })).toBe('[图片] img_wecom_0')
+    expect(liveTrigger({ headers: { req_id: 'req-4' }, body: {
+      ...MESSAGE, msgid: 'msg-i', msgtype: 'image', image: { url: 'https://example.invalid/i', aeskey: 'k' },
+    } })?.meta.images).toEqual([{ key: 'img_wecom_0', url: 'https://example.invalid/i', aeskey: 'k' }])
+    expect(liveMessageText({
+      msgid: 'f', chattype: 'single', from: { userid: 'alice' }, msgtype: 'file', file: { name: 'report.pdf' },
+    })).toBe('[文件] report.pdf')
   })
 
   it('refuses a malformed callback instead of creating a Trigger', () => {
@@ -153,6 +172,23 @@ describe('WeCom long-connection Trigger', () => {
     expect(liveTrigger({ headers: { req_id: 'req-6' }, body: { ...MESSAGE, text: { content: '   ' } } }))
       .toBeUndefined()
     expect(liveTrigger({ headers: { req_id: '' }, body: MESSAGE })).toBeUndefined()
+  })
+
+  it('keeps mixed text and image items in order with numbered markers', () => {
+    const parts = liveMessageParts({
+      msgid: 'msg-m', chattype: 'group', chatid: 'g', from: { userid: 'alice' }, msgtype: 'mixed',
+      mixed: { msg_item: [
+        { msgtype: 'text', text: { content: '第一行' } },
+        { msgtype: 'image', image: { url: 'https://example.invalid/0', aeskey: 'a0' } },
+        { msgtype: 'text', text: { content: '第二行' } },
+        { msgtype: 'image', image: { url: 'https://example.invalid/1' } },
+      ] },
+    })
+    expect(parts.text).toBe('第一行\n[图片] img_wecom_0\n第二行\n[图片] img_wecom_1')
+    expect(parts.images).toEqual([
+      { key: 'img_wecom_0', url: 'https://example.invalid/0', aeskey: 'a0' },
+      { key: 'img_wecom_1', url: 'https://example.invalid/1' },
+    ])
   })
 })
 
@@ -207,6 +243,54 @@ describe('WeCom long-connection replies', () => {
     } })
     expect(await sendLiveReply(nowhere)).toBe('gone')
     expect(bot.sends).toHaveLength(0)
+  })
+})
+
+describe('WeCom long-connection images', () => {
+  it('downloads an image before ingest and reads it back as an attachment', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wecom-live-image-'))
+    const bot = fakeBot()
+    const { ctx, received } = context(CONFIG, testDeployment({ stateDir: directory }))
+    const controller = new AbortController()
+    const run = startLive(ctx, CONFIG, controller.signal, () => bot)
+    bot.message({ headers: { req_id: 'req-i' }, body: {
+      ...MESSAGE, msgid: 'msg-i', msgtype: 'image', image: { url: 'https://example.invalid/i', aeskey: 'aes' },
+    } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(received).toHaveLength(1)
+    const trigger = received[0]!
+    expect(trigger.text).toBe('[图片] img_wecom_0')
+    const images = trigger.meta.images as { key: string; file: string; mediaType: string; size: number }[]
+    expect(images).toHaveLength(1)
+    expect(images[0]).toMatchObject({ key: 'img_wecom_0', mediaType: 'image/png', size: PNG.length })
+    expect(await readFile(images[0]!.file)).toEqual(PNG)
+    expect(bot.downloads).toEqual([{ url: 'https://example.invalid/i', aesKey: 'aes' }])
+    await run.stop()
+
+    const saveImage = vi.fn().mockResolvedValue({ attachmentId: 'image-id', mediaType: 'image/png', bytes: PNG.length, width: 1, height: 1 })
+    const agentCtx = new Context()
+    agentCtx.reflect.provide('attachments', { saveImage, imageLimits: { maxImageBytes: 1000, maxMessageImageBytes: 1000 } })
+    agentCtx.reflect.provide('llm', { resolveModelInfo: vi.fn().mockResolvedValue({ inputModalities: ['text', 'image'] }) })
+    const agent = { ctx: agentCtx, session: { requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) }, options: {} } as unknown as Agent
+    await expect(readLiveWecomImage(agent, directory, trigger, { id: 'msg-i', text: trigger.text }, 'img_wecom_0', controller.signal))
+      .resolves.toMatchObject({ source_message_id: 'msg-i', image_key: 'img_wecom_0' })
+    expect(saveImage).toHaveBeenCalledWith({ data: PNG, mediaType: 'image/png', name: 'img_wecom_0.png' })
+    expect(liveImageType(PNG)).toEqual({ mediaType: 'image/png', ext: '.png' })
+  })
+
+  it('marks a failed download and refuses a key that is not in the message', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wecom-live-image-'))
+    const bot = fakeBot()
+    bot.state.download = 'fail'
+    const { ctx, received } = context(CONFIG, testDeployment({ stateDir: directory }))
+    const run = startLive(ctx, CONFIG, new AbortController().signal, () => bot)
+    bot.message({ headers: { req_id: 'req-f' }, body: {
+      ...MESSAGE, msgid: 'msg-f', msgtype: 'image', image: { url: 'https://example.invalid/f' },
+    } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(received[0]?.text).toBe('[图片不可用]')
+    expect(received[0]?.meta.images).toBeUndefined()
+    await run.stop()
   })
 })
 

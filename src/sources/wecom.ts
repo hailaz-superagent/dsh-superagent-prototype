@@ -10,8 +10,10 @@ import type { Trigger } from '../core/index.ts'
 import { checkedImText } from '../infra/text.ts'
 import { record } from '../kv.ts'
 import { pause } from './poll.ts'
+import { readWecomImage, wecomImageKeys } from './wecom-image.ts'
 import { health, type Health, type SourceContext } from './host.ts'
 import { LIVE_TRANSPORT, sendLiveReply, startLive, type LiveCredentials, type LiveRun } from './wecom-live.ts'
+import { readLiveWecomImage } from './wecom-live-image.ts'
 import { SOURCE, wecomTriggerId } from './wecom-shared.ts'
 import type { ChannelLink, ContextPart, SourceChannel, SourceKind, SourcePolicyPart, ThreadContext, VariableSpec } from './kind.ts'
 
@@ -19,6 +21,14 @@ export { SOURCE, wecomTriggerId } from './wecom-shared.ts'
 export const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:3099'
 /** Cursor is the last bridge sequence number delivered or safely skipped. */
 export const CURSOR = record<number>('wecom-cursor')
+
+const BridgeImageSchema = z.object({
+  key: z.string().regex(/^img_wecom_\d+$/),
+  file: z.string().min(1),
+  mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']),
+  size: z.number().int().positive(),
+  name: z.string().optional(),
+}).strict()
 
 const BridgeEventSchema = z.object({
   seq: z.number().int().nonnegative(),
@@ -30,6 +40,7 @@ const BridgeEventSchema = z.object({
   text: z.string().min(1),
   at: z.string().min(1),
   addressed: z.enum(['mention', 'direct']),
+  images: z.array(BridgeImageSchema).max(20).optional(),
 }).strict()
 export type BridgeEvent = z.infer<typeof BridgeEventSchema>
 
@@ -138,6 +149,11 @@ const threadContext: ThreadContext<WecomConfig> = {
     const message = { id: String(trigger.meta.msgId ?? ''), from: trigger.actor.id, at: trigger.at, text: trigger.text }
     return { messages: [message], body: { messages: [message] } }
   },
+  images: wecomImageKeys,
+  image: (agent, _commands, trigger, message, key, stateDir, signal) =>
+    trigger.channel?.address.transport === LIVE_TRANSPORT
+      ? readLiveWecomImage(agent, stateDir, trigger, message, key, signal)
+      : readWecomImage(agent, String(trigger.channel?.address.bridgeUrl ?? DEFAULT_BRIDGE_URL), message.id, message.text, key, signal),
 }
 
 /** Posts a reply to the original WeCom request through the transport recorded in its address. */

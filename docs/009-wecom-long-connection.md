@@ -21,7 +21,8 @@ WeCom Source 现在支持两种接入方式，二者共用同一套 Trigger、Po
 | --- | --- |
 | `src/sources/wecom-shared.ts` | 共享 `SOURCE = 'wecom'` 和确定性的 Trigger id（按企业微信 `msgid`） |
 | `src/sources/wecom.ts` | Source 类型定义、配置 schema、bridge 事件 schema、Trigger 映射、Policy/Scope、Channel、健康检查和 watch 循环 |
-| `src/sources/wecom-live.ts` | 官方 SDK 适配器、长连接回调映射、被动/主动回复、连接生命周期 |
+| `src/sources/wecom-live.ts` | 官方 SDK 适配器、长连接回调与图片映射、被动/主动回复、连接生命周期 |
+| `src/sources/wecom-live-image.ts` | 在图片 URL 过期前下载解密并落盘，评估时作为附件读取 |
 | `src/wecom-watch.ts` | Cordis 插件入口：注册 kind，按配置运行 bridge 轮询或长连接 |
 | `tests/wecom.spec.ts` | bridge 路径：事件校验、游标、Policy、线程上下文 |
 | `tests/wecom-live.spec.ts` | 长连接路径：回调映射、回复路由、生命周期，以及真实 SDK 对假 WebSocket 服务端的往返 |
@@ -114,7 +115,11 @@ sendLiveReply()
 - `body.create_time`（秒）→ `at`；
 - `headers.req_id` → 被动回复用的 request id。
 
-读取前用 zod 校验；图片、文件、视频单独到达时返回 `undefined`，不创建 Trigger。混合消息只取文本部分，`${inline_mention:...}` 占位符和零宽空格会清理。
+读取前用 zod 校验；`${inline_mention:...}` 占位符和零宽空格会清理。
+
+图片在回调到达时立即用 SDK `downloadFile` 下载并解密（企业微信的图片 URL 只有约 5 分钟有效），按魔数校验 PNG/JPEG/WebP/GIF，限制 20MB，写入 `<stateDir>/wecom-live-media/<msgid>/<key>.<ext>`（目录 0700、文件 0600）。消息文本写成 `[图片] img_wecom_N`，图文混排按原顺序保留文本和图片；下载失败时该标记变成 `[图片不可用]`，消息本身不会丢。评估阶段 `threadContext.image` 读取文件并通过附件服务交给支持图片输入的模型；文本模型会明确拒绝。
+
+文件和视频没有可读正文，当前写成 `[文件]` / `[视频]`（有文件名时带上），提示评估向对方确认或要求重发。
 
 ### 5.3 回复
 
@@ -199,26 +204,29 @@ pnpm build
 `tests/wecom-live.spec.ts` 覆盖：
 
 - 群聊 @ / 单聊 / 混合文本 / 语音转写 / 占位符清理 / 非法回调；
+- 图片与图文混排的顺序、下载落盘、失败降级为 `[图片不可用]`、附件读取；
 - 4 秒内被动回复、超时主动发送、单聊用 userid、无会话时 `gone`；
 - 认证健康、消息串行入库、重复 `msgid` 去重、停止时断连；
 - 缺少凭证时 paused、SDK 错误进入健康状态；
 - 真实 `@wecom/aibot-node-sdk` 对假 WebSocket 服务端的认证、入站消息和被动回复往返。
 
-未执行：用真实企业微信机器人做线上切换（会中断当前正在使用的 bridge 会话），以及图片/文件/频道能力（当前不支持）。
+未执行：用真实企业微信机器人做线上切换（会中断当前正在使用的 bridge 会话），以及文件/视频正文和频道能力（当前不支持）。
 
 ## 8. 已知限制
 
-1. **只支持文本语义**：文本、图文混排里的文本、语音转写；图片、文件、视频不进入 Source。
+1. **文件/视频没有正文**：文本、图文混排、语音转写和图片已支持；文件和视频只保留标记，不能读取内容。
 2. **不支持频道/Topic**：官方 SDK 1.0.7 不提供频道事件与 API；bridge 的 Topic 兼容路径不在长连接里。
 3. **没有历史补收**：长连接只推送在线期间的新消息；进程停机期间的消息不会补。bridge 的 spool 具备这个能力。
 4. **单连接**：同一个 BotID 只能有一条长连接；多实例部署必须分开机器人。
 5. **单聊无 chatid**：主动发送用 userid；群聊用 chatid。两者都在 Trigger 的 channel address 里保存。
 6. **重启窗口**：进程重启后，4 秒被动窗口已过，未发出的回复自动走主动发送；已经入库的 Trigger 不会丢。
 7. **Secret 存在状态库**：配置文件权限为 0600，但面板字段是明文输入框；不要把截图或配置发到公开渠道。
+8. **图片落盘没有自动清理**：`<stateDir>/wecom-live-media/` 会随消息增长；当前量小可接受，长期运行需要按天/大小清理。
 
 ## 9. 后续工作
 
-- 用 `downloadFile` + 附件接口支持图片/文件；
+- 文件/视频下载与附件（需要评估侧能读文件）；
+- 图片目录的定期清理；
 - 频道（Topic）事件与回复；
 - 断线期间的消息补收（需要企业微信侧可拉取的历史接口或本地 spool）；
 - 把长连接健康拆成独立条目，区分「未配置」「认证失败」「重连中」。

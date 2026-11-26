@@ -8,9 +8,12 @@ export {
   wecomKind, wecomTrigger, wecomTriggerId, watchWecom,
 } from './sources/wecom.ts'
 export type { BridgeEvent, BridgeEvents, BridgeHealth, WecomConfig } from './sources/wecom.ts'
-export { LIVE_TRANSPORT, PASSIVE_WINDOW_MS, liveBot, liveMessageText, liveTrigger, sendLiveReply, setLiveBot, startLive }
-  from './sources/wecom-live.ts'
-export type { LiveBot, LiveCredentials, LiveFrame, LiveMessage, LiveRun } from './sources/wecom-live.ts'
+export {
+  LIVE_TRANSPORT, PASSIVE_WINDOW_MS, liveBot, liveMessageParts, liveMessageText, liveTrigger, sendLiveReply, setLiveBot, startLive,
+} from './sources/wecom-live.ts'
+export type { LiveBot, LiveCredentials, LiveFrame, LiveMessage, LiveMessageParts, LiveRun } from './sources/wecom-live.ts'
+export { MAX_LIVE_IMAGE_BYTES, liveImageType, prepareLiveImages, readLiveWecomImage } from './sources/wecom-live-image.ts'
+export type { LiveImageDownloader, LiveImageFile, LiveImageRef } from './sources/wecom-live-image.ts'
 
 export const name = 'dsh-superagent-wecom'
 export const inject = ['orchestrator']
