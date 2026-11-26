@@ -96,15 +96,38 @@ export const ExecutorConfigSchema = z.object({
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
+const singleLine = (text: string) => !/[\r\n]/.test(text)
+/** One Source identity a person holds, in that Source's own vocabulary. */
+export const PersonHandleSchema = z.object({
+  source: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
+  id: z.string().trim().min(1).max(200).refine(singleLine, 'A handle must be one line'),
+}).strict()
+/** One person and every Source identity known to be the same person. This is context for the agents, never authorization. */
+export const PersonSchema = z.object({
+  id: z.string().trim().regex(/^[A-Za-z0-9_-]{1,80}$/),
+  name: z.string().trim().max(100).refine(singleLine, 'A name must be one line').optional(),
+  handles: z.array(PersonHandleSchema).max(LIMITS.personHandles).default([]),
+}).strict()
+export const PeopleConfigSchema = z.object({
+  people: z.array(PersonSchema).max(LIMITS.people).default([]),
+}).strict()
+  .refine(config => new Set(config.people.map(person => person.id.toLowerCase())).size === config.people.length, 'Person ids must be unique')
+  .refine(config => {
+    const seen = config.people.flatMap(person => person.handles.map(handle => `${handle.source}\u0000${handle.id.toLowerCase()}`))
+    return new Set(seen).size === seen.length
+  }, 'A Source handle belongs to one person')
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
+  people: PeopleConfigSchema.default(() => PeopleConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type Person = z.infer<typeof PersonSchema>
+export type PersonHandle = z.infer<typeof PersonHandleSchema>
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'people' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 
@@ -118,6 +141,18 @@ export function policyVersion(settings: Settings): string {
 }
 export function allowedSender(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {
   return settings.policy.sources[actor.source]?.allowed.find(entry => sameName(entry.id, actor.id))
+}
+/** The person a Source identity belongs to, if the deployment's People directory binds it. */
+export function personOf(settings: Pick<Settings, 'people'>, actor: ActorRef): Person | undefined {
+  return settings.people.people.find(person => person.handles.some(handle => handle.source === actor.source
+    && sameName(handle.id, actor.id)))
+}
+/** The name shown for a person: its name, else its id. */
+export const personLabel = (person: Person): string => person.name || person.id
+/** The display name of the person a Source identity belongs to, when the People directory binds it. */
+export function personNameOf(settings: Pick<Settings, 'people'>, actor: ActorRef): string | undefined {
+  const person = personOf(settings, actor)
+  return person && personLabel(person)
 }
 /** Look up `actor` in the Source's `bots` policy list (validated by the Source's kind), whose messages are admitted as inferred candidates at most. */
 export function listedBot(settings: Settings, actor: ActorRef): z.infer<typeof AllowedSchema> | undefined {

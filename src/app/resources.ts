@@ -11,6 +11,7 @@ import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inp
 import { threadTitle } from './views/records.ts'
 import { transcriptEntry } from './context.ts'
 import { builtInParts, defaultPrompts } from './prompts.ts'
+import { personNameOf } from '../policy.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Commands } from '../infra/commands.ts'
 import type { PromptVersion, Prompts } from './prompts.ts'
@@ -40,9 +41,9 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'ticket/<id>/input/<id>', holds: 'one input it was delivered', executor: true },
   { name: 'trigger/<id>', holds: 'a trigger\'s text, where it went, the message it replies to and the messages around it on its thread',
     executor: true },
-  { name: 'settings', holds: 'settings by block, each with the revision a save names: the small blocks whole, the Policy and the Source '
-    + 'instances summarized' },
-  { name: 'settings/<block>', holds: 'one settings block whole, as orchestrator_settings_save takes it: policy, eval, executor, pause or '
+  { name: 'settings', holds: 'settings by block, each with the revision a save names: the small blocks whole, the People directory, the Policy and '
+    + 'the Source instances summarized' },
+  { name: 'settings/<block>', holds: 'one settings block whole, as orchestrator_settings_save takes it: policy, eval, executor, people, pause or '
     + 'source:<id>' },
   { name: 'prompts', holds: 'the prompt revision each Session reads, the skills, and the saved versions' },
   { name: 'prompts/<revision>', holds: 'one prompt version by number, or current, the one the Session works under', executor: true },
@@ -264,7 +265,9 @@ const ROUTES: readonly Route[] = [
       // Render the input on demand with its resolved source link, matching either its short key or full input ID.
       const input = ticket.inputs.find(item => key(item.id) === part || item.id === part)
       const trigger = input?.kind === 'trigger' ? host.store.triggers.get(input.triggerId) : undefined
-      const card = trigger && input?.kind === 'trigger' ? triggerMessage(trigger, await host.sourceLink(trigger, signal), input.note) : undefined
+      const card = trigger && input?.kind === 'trigger'
+        ? triggerMessage(trigger, await host.sourceLink(trigger, signal), input.note, undefined, personNameOf(host.store.settings(), trigger.actor))
+        : undefined
       const message = input && inputMessage(input, card)
       if (message === undefined) throw new Error('Unknown ticket input')
       body = message

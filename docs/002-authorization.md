@@ -4,6 +4,12 @@ Authorization determines who may start work and what that work may include. This
 
 The host enforces allowed lists, rules and Mandates. Messages, comments and quoted documents are inputs to a decision; they cannot change those permissions.
 
+## People directory
+
+The deployment's `people` settings block keeps a People directory: each person with the handles of its accounts on several Sources. It is context for the agents, never authorization. The main Session's Policy prompt section lists it, so a request arriving on one Source can be attributed to the same person's Tickets elsewhere. Adding a handle does not let it originate work: the handle must still appear on that Source's allowed list, and the gate, Mandates and revalidation never consult the directory.
+
+The directory is bounded and validated: person ids are unique, a Source handle belongs to one person, and a person has at most a few handles. Save it with `orchestrator_settings_save` (block `people`) on an explicit human configuration request, or through `PUT settings/people` in the management API.
+
 ## Two paths for a Trigger
 
 ### Eval: deciding whether to start work

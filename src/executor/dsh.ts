@@ -9,7 +9,7 @@ import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Execu
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
-import type { Settings } from '../policy.ts'
+import { personNameOf, type Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
@@ -118,8 +118,9 @@ const capped = (text: string, limit: number, read: string) =>
  * Formats a Trigger for worker delivery: author, thread, timestamp, text up to `TRIGGER_CHARS`, source message link,
  * optional routing note, and a preview of the replied-to message when the worker has not yet seen it.
  */
-export function triggerMessage(trigger: Trigger, link: { source_url?: string; source_url_read?: string }, note?: string, repliesTo?: Trigger) {
-  return { trigger_id: trigger.id, from: trigger.actor.id, thread: threadKey(trigger.threads[0]!), at: trigger.at,
+export function triggerMessage(trigger: Trigger, link: { source_url?: string; source_url_read?: string }, note?: string, repliesTo?: Trigger,
+  person?: string) {
+  return { trigger_id: trigger.id, from: trigger.actor.id, ...(person ? { from_person: person } : {}), thread: threadKey(trigger.threads[0]!), at: trigger.at,
     ...capped(trigger.text, TRIGGER_CHARS, `trigger/${trigger.id}`), ...link, ...(note ? { routing_note: note } : {}),
     ...(repliesTo ? { replies_to: { trigger_id: repliesTo.id, preview: repliesTo.text.replace(/\s+/g, ' ').slice(0, 160) } } : {}) }
 }
@@ -347,7 +348,8 @@ export class DshExecutor implements Executor {
     if (!trigger) return undefined
     const parent = this.host.repliedTo(trigger)
     const seen = parent && (parent.id === ticket.origin.triggerId || ticket.inputs.some(item => item.kind === 'trigger' && item.triggerId === parent.id))
-    return triggerMessage(trigger, await this.host.sourceLink(trigger), note, seen ? undefined : parent)
+    return triggerMessage(trigger, await this.host.sourceLink(trigger), note, seen ? undefined : parent,
+      personNameOf(this.host.store.settings(), trigger.actor))
   }
   /**
    * After the ending transaction commits (so a rollback leaves the worker working, and a launch the same transaction queued

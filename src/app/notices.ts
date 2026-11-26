@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
+import { personNameOf } from '../policy.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { repliedTo } from './links.ts'
 import type { Store } from './store.ts'
@@ -93,7 +94,8 @@ export function followupNotice(store: Store, sources: SourceRegistry, triggerId:
     return ticket && liveTicket(ticket) ? [{ ticket_id: id, title: ticket.title, state: ticketCard(ticket).state, ...context }] : []
   })
   if (!tickets.length) return undefined
-  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets)
+  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger),
+    personNameOf(store.settings(), trigger.actor)), tickets)
 }
 /**
  * A person's message that reached tickets, as the main Session hears of it: the message as their workers read it, and the

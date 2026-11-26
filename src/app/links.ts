@@ -5,6 +5,7 @@ import { readFeishuLink } from '../sources/feishu-read.ts'
 import { feishuRef, feishuSettings } from '../sources/feishu.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { triggerMessage } from '../executor/dsh.ts'
+import { personNameOf } from '../policy.ts'
 import { relatedTickets, ticketCard, triggerCard } from './cards.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
@@ -62,7 +63,8 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
     .map(item => ({ trigger_id: trigger.id, ticket_id: item.ticketId, reason: item.reason })))
   // Format the primary trigger like a worker input (including the message it replies to) and summarize earlier batch triggers as cards.
   const others = candidate.triggers.filter(trigger => trigger.id !== primary.id)
-  return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, repliedTo(host, primary)), strength: candidate.strength,
+  return { ...triggerMessage(primary, await sourceLink(host, primary), undefined, repliedTo(host, primary),
+    personNameOf(settings, primary.actor)), strength: candidate.strength,
     mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
