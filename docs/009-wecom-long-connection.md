@@ -13,7 +13,7 @@ WeCom Source 现在支持两种接入方式，二者共用同一套 Trigger、Po
 
 `live` 模式直接使用企业微信官方 `@wecom/aibot-node-sdk`：SDK 负责认证、心跳、断线重连，dsh-superagent 只做事件映射、入库和回复。没有 bridge、没有轮询、没有回调 URL。
 
-当前运行中的部署仍保持 `bridge` 模式；本文第 6 节说明如何安全切换。切换前必须先停掉占用同一个机器人的 bridge，因为**一个机器人同时只允许一条长连接**。
+实际使用哪种方式由 Source 设置决定；本文第 6 节说明如何安全切换。切换前必须先停掉占用同一个机器人的 bridge，因为**一个机器人同时只允许一条长连接**。
 
 ## 2. 代码结构
 
@@ -21,11 +21,13 @@ WeCom Source 现在支持两种接入方式，二者共用同一套 Trigger、Po
 | --- | --- |
 | `src/sources/wecom-shared.ts` | 共享 `SOURCE = 'wecom'` 和确定性的 Trigger id（按企业微信 `msgid`） |
 | `src/sources/wecom.ts` | Source 类型定义、配置 schema、bridge 事件 schema、Trigger 映射、Policy/Scope、Channel、健康检查和 watch 循环 |
-| `src/sources/wecom-live.ts` | 官方 SDK 适配器、长连接回调与图片映射、被动/主动回复、连接生命周期 |
+| `src/sources/wecom-live.ts` | 官方 SDK 适配器、长连接回调与媒体映射、被动/主动回复、连接生命周期 |
 | `src/sources/wecom-live-image.ts` | 在图片 URL 过期前下载解密并落盘，评估时作为附件读取 |
+| `src/sources/wecom-live-reply.ts` | 把回复中的本地 Markdown 链接上传为图片/文件/视频消息，并从正文移除本地路径 |
+| `src/sources/wecom-live-topic.ts` | 拦截频道 @ 事件，拉取帖子/评论正文与图片、文件，并按 topic 聚合 Thread |
 | `src/wecom-watch.ts` | Cordis 插件入口：注册 kind，按配置运行 bridge 轮询或长连接 |
 | `tests/wecom.spec.ts` | bridge 路径：事件校验、游标、Policy、线程上下文 |
-| `tests/wecom-live.spec.ts` | 长连接路径：回调映射、回复路由、生命周期，以及真实 SDK 对假 WebSocket 服务端的往返 |
+| `tests/wecom-live.spec.ts` | 长连接路径：回调与频道媒体映射、文本/媒体回复路由、生命周期，以及真实 SDK 对假 WebSocket 服务端的往返 |
 
 构建时 `@wecom/aibot-node-sdk` 被标记为 external（`tsdown.config.ts`），运行时从 dsh-superagent 自己的 `node_modules` 解析；升级 SDK 不需要重新打包业务代码。
 
@@ -43,8 +45,8 @@ Eval → Ticket → Executor
    │  outbox 产生回复
    ▼
 sendLiveReply()
-   ├─ 回调 4 秒内：aibot_respond_msg（被动回复原消息）
-   └─ 超时/重启后：aibot_send_msg（主动发到会话）
+   ├─ 文本：回调 4 秒内 aibot_respond_msg，超时/重启后 aibot_send_msg
+   └─ 本地图片/文件/视频：uploadMedia → aibot_send_msg（媒体消息）
 ```
 
 与 bridge 的关键差异：
@@ -121,7 +123,7 @@ sendLiveReply()
 
 引用消息（`quote`）会在正文前加 `[引用]` 段：引用文本/语音转写直接列出，引用图片、文件、视频也会下载并按同样规则标记。
 
-频道（Topic）事件由适配器在连接管理器处拦截 `aibot_topic_event_callback`（SDK 1.0.7 不分发该命令），再用 `aibot_topic_get_post_list` / `aibot_topic_get_reply_list` 拉取正文。Thread 按 `topic:<topicId>` 聚合，回复走 `aibot_topic_send_reply`（评论回复带 `parent_reply_id`）。频道内只处理文本正文并清理 `@` 占位符；帖子/评论里的图片、文件（`image_list`/`inline_file_list`）目前不下载。
+频道（Topic）事件由适配器在连接管理器处拦截 `aibot_topic_event_callback`（SDK 1.0.7 不分发该命令），再用 `aibot_topic_get_post_list` / `aibot_topic_get_reply_list` 拉取正文。Thread 按 `topic:<topicId>` 聚合，回复走 `aibot_topic_send_reply`（评论回复带 `parent_reply_id`）。帖子/评论正文会清理 `@` 占位符；其 `image_list` / `inline_file_list` 在拉取后立即按与普通消息相同的规则下载并编号（频道附件用详情返回的 `download_url` 加 `cookie_name`/`cookie_value` 下载，未加密；文本为 `[图片] img_wecom_N`、`[文件] 名称（已保存：路径）`），失败则标记不可用。频道回复仍只有文本。
 
 ### 5.3 回复
 
@@ -129,7 +131,9 @@ sendLiveReply()
 
 - 回调到达 4 秒内、且有 `req_id`：走 `aibot_respond_msg`，回复挂在原消息上；
 - 超过窗口、进程重启、或被动回复失败：走 `aibot_send_msg`，单聊目标用 `userid`，群聊用 `chatid`，并带 `chat_type: 1/2`；
-- 文本经过与其他 IM 相同的 100 词上限校验，避免超长消息被企业微信拒绝。
+- 文本经过与其他 IM 相同的 100 词上限校验，避免超长消息被企业微信拒绝；
+- 回复正文中的本地绝对路径 Markdown 链接会变为媒体消息：图片 Markdown 链接指向绝对路径（如 `/abs/shot.png`）时发图片，文件链接指向绝对路径（如 `/abs/report.pdf`）时发文件，`.mp4`/`.mov` 等发视频。文件先经 SDK `uploadMedia` 上传为临时素材，再用 `aibot_send_msg` 主动发送；链接从正文中移除，无法读取的路径保留为普通文本；
+- 出站媒体按官方素材上限：图片、视频 10MB，普通文件 20MB；图片按魔数校验 PNG/JPEG/WebP/GIF；频道 Topic 没有媒体回复 API，仍只发文本。
 
 ### 5.4 生命周期与健康
 
@@ -148,7 +152,7 @@ sendLiveReply()
 - `paused`：Source 关闭或凭证缺失；
 - `error`：SDK 错误或消息处理失败。
 
-### 5.5 消息类型支持矩阵
+### 5.5 总体支持情况
 
 官方长连接接收消息（[文档 101834](https://developer.work.weixin.qq.com/document/path/101834)）与本 Source 的实际支持：
 
@@ -161,11 +165,25 @@ sendLiveReply()
 | `file` | ✅ | 下载解密；`[文件] 名称（已保存：路径）`，由文件工具读取 |
 | `video` | ✅ | 下载解密；`[视频] 名称（已保存：路径）`，模型不能直接观看 |
 | `quote`（引用） | ✅ | 正文前加 `[引用]` 段；引用媒体同样下载 |
-| `event`（enter_chat / template_card_event / feedback_event） | ❌ | 不建 Trigger |
-| 频道 Topic（帖子/评论 @） | ✅ | 拦截 `aibot_topic_event_callback`，拉取正文生成 `topic:<id>` Thread；回复走 `aibot_topic_send_reply`；频道图片/文件不下载 |
-| `stream`（流式刷新） | ❌ | 仅 URL 回调模式 |
+| 频道 Topic（帖子/评论 @） | ✅ | 拦截 `aibot_topic_event_callback`，拉取正文、图片与文件生成 `topic:<id>` Thread；回复走 `aibot_topic_send_reply` |
+| `event`（enter_chat / template_card_event / feedback_event） | ❌ | 不建 Trigger；本 agent 不发卡片、不自动发欢迎语，也没有反馈处理入口 |
+| `stream`（流式刷新） | ❌ | 仅 URL 回调模式；本 agent 只产生一条最终回复 |
 
-回复方向只发送 Markdown 文本：回调 4 秒内走被动回复挂原消息，超时或重启后走主动发送；不发送图片、文件、语音或视频。
+回复与主动发送方向：
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| Markdown 文本 | ✅ | 4 秒内被动回复挂原消息，超时/重启后主动发送 |
+| 图片 | ✅ | 回复中用 Markdown 图片语法指向本地绝对路径（如 `/abs/a.png`）；上传后作为图片消息发送，上限 10MB |
+| 文件 | ✅ | 回复中用 Markdown 链接指向本地绝对路径（如 `/abs/a.pdf`）；上传后作为文件消息发送，上限 20MB |
+| 视频 | ✅ | `.mp4`/`.mov` 等本地路径；上传后作为视频消息发送，标题用文件名，上限 10MB |
+| 语音 | ❌ | 企业微信只给入站语音的转写文本；本 agent 不合成语音 |
+| 频道回复 | ✅ | 仅文本；Topic API 没有媒体回复 |
+| 模板卡片 / 更新卡片 | ❌ | agent 没有卡片 UI；`template_card_event` 也不处理 |
+| 流式回复 | ❌ | 不需要中间帧；最终文本一次发出，避免额外的状态机 |
+| 欢迎语 | ❌ | `enter_chat` 不自动回复，避免未经配置的主动打扰 |
+
+概括：官方消息类型和媒体方向已经覆盖到本 agent 有内容可发的部分（文本、图片、文件、视频、引用、频道与频道媒体）；语音合成、流式、卡片、欢迎语属于本 agent 没有对应产出或需要产品配置的能力，明确不实现，不会静默丢消息。
 
 ## 6. 从 bridge 切换与回滚
 
@@ -226,29 +244,32 @@ pnpm build
 
 - 群聊 @ / 单聊 / 混合文本 / 语音转写与空转写兜底 / 占位符清理 / 非法回调；
 - 图片、文件、视频、引用消息的标记与顺序，下载落盘、失败降级为不可用、图片附件读取；
+- 频道帖子/评论中的图片和文件下载与编号；
+- 回复中的本地图片、文件链接上传并主动发送，正文清理，失效路径保留为文本；
 - 4 秒内被动回复、超时主动发送、单聊用 userid、无会话时 `gone`；
 - 认证健康、消息串行入库、重复 `msgid` 去重、停止时断连；
 - 缺少凭证时 paused、SDK 错误进入健康状态；
 - 真实 `@wecom/aibot-node-sdk` 对假 WebSocket 服务端的认证、入站消息和被动回复往返。
 
-未执行：用真实企业微信机器人做线上切换（会中断当前正在使用的 bridge 会话），以及频道内图片/文件的下载。
+未执行：用真实企业微信机器人做线上切换（会中断当前正在使用的 bridge 会话）。
 
 ## 8. 已知限制
 
 1. **文件/视频没有原生附件**：文本、图文混排、语音转写、图片、文件、视频和引用消息都会进入 Trigger；图片作为模型附件，文件和视频下载到本机并在文本里给出路径，由文件工具读取，模型不能直接观看视频。
-2. **频道只处理文本**：Topic 帖子/评论正文会进入 Trigger，但其中的图片、文件和聊天记录不下载（`image_list` 只有 `media_id`，尚未接下载 API）。
-3. **没有历史补收**：长连接只推送在线期间的新消息；进程停机期间的消息不会补。bridge 的 spool 具备这个能力。
-4. **单连接**：同一个 BotID 只能有一条长连接；多实例部署必须分开机器人。
-5. **单聊无 chatid**：主动发送用 userid；群聊用 chatid。两者都在 Trigger 的 channel address 里保存。
-6. **重启窗口**：进程重启后，4 秒被动窗口已过，未发出的回复自动走主动发送；已经入库的 Trigger 不会丢。
-7. **Secret 存在状态库**：配置文件权限为 0600，但面板字段是明文输入框；不要把截图或配置发到公开渠道。
-8. **媒体落盘没有自动清理**：`<stateDir>/wecom-live-media/` 会随消息增长；当前量小可接受，长期运行需要按天/大小清理。
-9. **回复只能是文本**：收到的图片/文件/视频不会原样回传，回复统一走 Markdown 文本。
-10. **单条媒体上限 20MB**：超过上限的文件/视频会标记为不可用，不会阻塞消息。
+2. **出站媒体是本地文件**：只能在回复里引用运行机器上的绝对路径，不能引用公网 URL；图片/视频上限 10MB、普通文件 20MB，超过或读不到时路径会留在正文里。
+3. **频道回复只有文本**：Topic 帖子/评论的图片和文件会下载，但回复 API 不支持媒体消息。
+4. **没有历史补收**：长连接只推送在线期间的新消息；进程停机期间的消息不会补。bridge 的 spool 具备这个能力。
+5. **单连接**：同一个 BotID 只能有一条长连接；多实例部署必须分开机器人。
+6. **单聊无 chatid**：主动发送用 userid；群聊用 chatid。两者都在 Trigger 的 channel address 里保存。
+7. **重启窗口**：进程重启后，4 秒被动窗口已过，未发出的回复自动走主动发送；已经入库的 Trigger 不会丢。
+8. **Secret 存在状态库**：配置文件权限为 0600，但面板字段是明文输入框；不要把截图或配置发到公开渠道。
+9. **媒体落盘没有自动清理**：`<stateDir>/wecom-live-media/` 会随消息增长；当前量小可接受，长期运行需要按天/大小清理。
+10. **单条入站媒体上限 20MB**：超过上限的文件/视频会标记为不可用，不会阻塞消息。频道附件 URL 约 1 小时有效，因此拉取帖子后立即下载。
+11. **事件、流式、卡片、欢迎语不实现**：见 5.5；这些回调不会创建 Trigger，也不会自动回复。
 
 ## 9. 后续工作
 
 - 媒体目录的定期清理；
-- 频道内图片/文件下载；
 - 断线期间的消息补收（需要企业微信侧可拉取的历史接口或本地 spool）；
+- 如果产品需要，再补欢迎语、模板卡片与流式回复；
 - 把长连接健康拆成独立条目，区分「未配置」「认证失败」「重连中」。

@@ -33,3 +33,5 @@ The orchestrator extracts delivery facts and writes a new notification; it must 
 Use the source routing metadata and worker report when replying; for missing technical facts, wait for the worker's report, or request one with orchestrator_ticket_request_status when the ticket is idle, rather than investigating yourself.
 Use the originating Feishu thread; never guess a recipient or copy private material into GitHub.
 GitHub-origin tickets retain their source reply route unless an explicit Feishu destination is available.
+
+For a WeCom long-connection reply, an absolute local Markdown link (`![截图](/abs/a.png)`, `[报告](/abs/a.pdf)`, `.mp4` for video) is uploaded and sent as a separate image, file or video message, and the link is removed from the text; use it only for a file that exists and that the person should receive. Channel post and comment replies stay text-only.

@@ -12,6 +12,7 @@ import type { OutboundMessage, Trigger } from '../core/index.ts'
 import { checkedImText } from '../infra/text.ts'
 import { health, type SourceContext } from './host.ts'
 import { prepareLiveMedia, type LiveMediaRef } from './wecom-live-image.ts'
+import { prepareReplyMedia, sendReplyMedia } from './wecom-live-reply.ts'
 import { SOURCE, wecomTriggerId } from './wecom-shared.ts'
 import { LIVE_TOPIC_TRANSPORT, TOPIC_EVENT_CALLBACK, liveTopicTrigger, topicTarget, type TopicContent, type TopicTarget } from './wecom-live-topic.ts'
 import type { WecomConfig } from './wecom.ts'
@@ -85,6 +86,7 @@ export interface LiveBot {
   reply(requestId: string, body: Record<string, unknown>): Promise<void>
   sendMessage(chatId: string, body: Record<string, unknown>): Promise<void>
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Buffer; filename?: string }>
+  uploadMedia(data: Buffer, type: 'image' | 'file' | 'video', filename: string): Promise<string>
   topicPost(topicId: string, postId: string): Promise<TopicContent | undefined>
   topicReplyContent(topicId: string, postId: string, replyId: string): Promise<TopicContent | undefined>
   sendTopicReply(target: TopicTarget, content: string): Promise<void>
@@ -193,6 +195,15 @@ export function sdkLiveBot(config: LiveCredentials): LiveBot {
       }
     },
     downloadFile(url, aesKey) { return client.downloadFile(url, aesKey) },
+    async uploadMedia(data, type, filename) {
+      try {
+        const uploaded = await client.uploadMedia(data, { type, filename })
+        if (!uploaded.media_id) throw new Error('WeCom upload returned no media_id')
+        return uploaded.media_id
+      } catch (error) {
+        throw ackError('WeCom media upload', error)
+      }
+    },
     async topicPost(topicId, postId) {
       const body = await topicCall('aibot_topic_get_post_list', { topic_id: topicId, post_id_list: [postId] })
       return (body?.post_list as TopicContent[] | undefined)?.[0]
@@ -381,7 +392,9 @@ const markdownBody = (content: string): Record<string, unknown> => ({ msgtype: '
  *
  * A fresh callback id is answered passively, which keeps quick acknowledgements in
  * the original message; a late result (or a reply after a restart) uses an active
- * `aibot_send_msg` to the chat instead.
+ * `aibot_send_msg` to the chat instead. Absolute local Markdown links become
+ * image, file or video messages sent after the text; channel Topic replies stay
+ * text-only because the topic API has no media message.
  */
 export async function sendLiveReply(message: OutboundMessage): Promise<'sent' | 'gone'> {
   const bot = activeBot
@@ -390,27 +403,39 @@ export async function sendLiveReply(message: OutboundMessage): Promise<'sent' | 
     reqId = '', chatId = '', userId = '', chatType = '', transport = '',
     topicId = '', postId = '', parentReplyId = '',
   } = message.channel.address
-  const text = checkedImText(message.text)
   if (transport === LIVE_TOPIC_TRANSPORT) {
     if (!topicId || !postId) return 'gone'
+    const text = checkedImText(message.text)
     await bot.sendTopicReply({ topicId, postId, ...(parentReplyId ? { parentReplyId } : {}) }, text)
     return 'sent'
   }
   const target = chatId || userId
   if (!target) return 'gone'
-  pruneCallbacks()
-  const receivedAt = callbacks.get(reqId)
-  if (reqId && receivedAt !== undefined && Date.now() - receivedAt <= PASSIVE_WINDOW_MS) {
-    try {
-      await bot.reply(reqId, markdownBody(text))
-      callbacks.delete(reqId)
-      return 'sent'
-    } catch {
-      // The passive window may have closed while the outbox queued the reply; fall back to an active send.
+  const prepared = await prepareReplyMedia(message.text)
+  const text = checkedImText(prepared.text)
+  let sent = false
+  if (text) {
+    pruneCallbacks()
+    const receivedAt = callbacks.get(reqId)
+    if (reqId && receivedAt !== undefined && Date.now() - receivedAt <= PASSIVE_WINDOW_MS) {
+      try {
+        await bot.reply(reqId, markdownBody(text))
+        callbacks.delete(reqId)
+        sent = true
+      } catch {
+        // The passive window may have closed while the outbox queued the reply; fall back to an active send.
+      }
+    }
+    if (!sent) {
+      await bot.sendMessage(target, { ...markdownBody(text), chat_type: chatType === 'group' ? 2 : 1 })
+      sent = true
     }
   }
-  await bot.sendMessage(target, { ...markdownBody(text), chat_type: chatType === 'group' ? 2 : 1 })
-  return 'sent'
+  if (prepared.media.length) {
+    await sendReplyMedia(bot, target, chatType, prepared.media)
+    sent = true
+  }
+  return sent ? 'sent' : 'gone'
 }
 
 /** One running long connection and its configuration, so the watcher can restart it when settings change. */
@@ -473,6 +498,9 @@ export function startLive(ctx: SourceContext, config: WecomConfig, signal: Abort
           : await current.topicPost(target.topicId, target.postId)
         const trigger = liveTopicTrigger(frame, target, content)
         if (!trigger || seen.has(trigger.id)) return
+        // Topic image and file URLs also expire, so keep their bytes before ingest.
+        await prepareLiveMedia(ctx, current, trigger, running.signal)
+        if (running.signal.aborted) return
         await ctx.receive(trigger)
         seen.add(trigger.id)
         if (seen.size > 1000) seen.delete(seen.values().next().value as string)

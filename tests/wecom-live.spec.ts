@@ -1,5 +1,5 @@
 /** WeCom long connection: Trigger mapping, reply routing, runner lifecycle, and the real SDK adapter. */
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -15,7 +15,7 @@ import {
   type LiveBot, type LiveFrame,
 } from '../src/sources/wecom-live.ts'
 import { liveImageType, readLiveWecomImage } from '../src/sources/wecom-live-image.ts'
-import { LIVE_TOPIC_TRANSPORT } from '../src/sources/wecom-live-topic.ts'
+import { LIVE_TOPIC_TRANSPORT, type TopicContent } from '../src/sources/wecom-live-topic.ts'
 import { SOURCE, wecomTriggerId } from '../src/sources/wecom-shared.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -31,6 +31,7 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0
 
 const servers: WebSocketServer[] = []
 afterEach(async () => {
+  vi.unstubAllGlobals()
   setLiveBot(undefined)
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => {
     for (const client of server.clients) client.terminate()
@@ -42,8 +43,9 @@ interface FakeBot extends LiveBot {
   readonly replies: { requestId: string; body: Record<string, unknown> }[]
   readonly sends: { chatId: string; body: Record<string, unknown> }[]
   readonly downloads: { url: string; aesKey?: string }[]
+  readonly uploads: { type: string; filename: string; size: number }[]
   readonly topicSends: { target: { topicId: string; postId: string; parentReplyId?: string }; content: string }[]
-  readonly state: { connected: boolean; connects: number; disconnects: number; download: 'ok' | 'fail' }
+  readonly state: { connected: boolean; connects: number; disconnects: number; download: 'ok' | 'fail'; topicContent?: TopicContent }
   authenticated(): void
   disconnected(reason?: string): void
   failed(error: unknown): void
@@ -57,14 +59,17 @@ function fakeBot(): FakeBot {
   let onError: ((error: unknown) => void) | undefined
   let onMessage: ((frame: LiveFrame) => void) | undefined
   let onTopic: ((frame: LiveFrame) => void) | undefined
-  const state = { connected: false, connects: 0, disconnects: 0, download: 'ok' as 'ok' | 'fail' }
+  const state: { connected: boolean; connects: number; disconnects: number; download: 'ok' | 'fail'; topicContent?: TopicContent } = {
+    connected: false, connects: 0, disconnects: 0, download: 'ok',
+  }
   const replies: { requestId: string; body: Record<string, unknown> }[] = []
   const sends: { chatId: string; body: Record<string, unknown> }[] = []
   const downloads: { url: string; aesKey?: string }[] = []
+  const uploads: { type: string; filename: string; size: number }[] = []
   const topicSends: { target: { topicId: string; postId: string; parentReplyId?: string }; content: string }[] = []
   return {
     get connected() { return state.connected },
-    state, replies, sends, downloads, topicSends,
+    state, replies, sends, downloads, uploads, topicSends,
     onAuthenticated(handler) { onAuthenticated = handler },
     onDisconnected(handler) { onDisconnected = handler },
     onError(handler) { onError = handler },
@@ -79,11 +84,15 @@ function fakeBot(): FakeBot {
       if (state.download === 'fail') throw new Error('download failed')
       return { buffer: PNG, filename: 'photo.png' }
     },
+    async uploadMedia(data, type, filename) {
+      uploads.push({ type, filename, size: data.length })
+      return `media-${uploads.length}`
+    },
     async topicPost(_topicId, postId) {
-      return { post_id: postId, content: '频道帖子内容', create_time: 1_700_000_000, creator: { userid: 'alice' } }
+      return state.topicContent ?? { post_id: postId, content: '频道帖子内容', create_time: 1_700_000_000, creator: { userid: 'alice' } }
     },
     async topicReplyContent(_topicId, _postId, replyId) {
-      return { reply_id: replyId, content: '频道评论内容', create_time: 1_700_000_100, creator: { userid: 'alice' } }
+      return state.topicContent ?? { reply_id: replyId, content: '频道评论内容', create_time: 1_700_000_100, creator: { userid: 'alice' } }
     },
     async sendTopicReply(target, content) { topicSends.push({ target, content }) },
     authenticated() { onAuthenticated?.() },
@@ -261,6 +270,39 @@ describe('WeCom long-connection channels', () => {
     expect(bot.topicSends[0]!.target).toEqual({ topicId: 't1', postId: 'p1', parentReplyId: 'r1' })
     await run.stop()
   })
+
+  it('downloads images and files attached to a channel post', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wecom-live-topic-media-'))
+    const bot = fakeBot()
+    bot.state.topicContent = {
+      post_id: 'p1', content: '看附件', create_time: 1_700_000_000, creator: { userid: 'alice' },
+      image_list: [{ download_url: 'https://example.invalid/topic-image', cookie_name: 'ic', cookie_value: 'iv' }],
+      inline_file_list: [{
+        download_url: 'https://example.invalid/topic-file', file_name: 'spec.pdf', cookie_name: 'fc', cookie_value: 'fv',
+      }],
+    }
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(new Response(PNG, {
+      status: 200, headers: { 'content-type': 'image/png', 'content-length': String(PNG.length) },
+    })))
+    vi.stubGlobal('fetch', fetchMock)
+    const { ctx, received } = context(CONFIG, testDeployment({ stateDir: directory }))
+    const run = startLive(ctx, CONFIG, new AbortController().signal, () => bot)
+    bot.topic({ headers: { req_id: 'req-t3' }, body: {
+      msgid: 'tm-3', topic_id: 't1', from: { userid: 'alice' }, create_time: 1_700_000_000, msgtype: 'event',
+      event: { eventtype: 'topic_at_bot', topic_at_bot: { post_id: 'p1' } },
+    } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(received).toHaveLength(1)
+    const trigger = received[0]!
+    expect(trigger.text).toMatch(/^看附件\n\[图片\] img_wecom_0\n\[文件\] spec\.pdf（已保存：.*file_wecom_0\.pdf）$/)
+    expect((trigger.meta.images as { key: string }[])[0]?.key).toBe('img_wecom_0')
+    expect(trigger.meta.media).toMatchObject([{ kind: 'file', name: 'spec.pdf' }])
+    expect(bot.downloads).toEqual([])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[0]).toEqual(['https://example.invalid/topic-image', { signal: expect.any(AbortSignal), headers: { cookie: 'ic=iv' } }])
+    expect(fetchMock.mock.calls[1]).toEqual(['https://example.invalid/topic-file', { signal: expect.any(AbortSignal), headers: { cookie: 'fc=fv' } }])
+    await run.stop()
+  })
 })
 
 describe('WeCom long-connection replies', () => {
@@ -287,6 +329,46 @@ describe('WeCom long-connection replies', () => {
       chatId: 'group-1', body: { msgtype: 'markdown', markdown: { content: '收到，正在处理' }, chat_type: 2 },
     })
     await run.stop()
+  })
+
+  it('sends local Markdown images and files as media after the text', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wecom-live-reply-media-'))
+    const image = join(directory, 'shot.png')
+    const file = join(directory, 'report.pdf')
+    await writeFile(image, PNG)
+    await writeFile(file, Buffer.from('%PDF-1.4 test'))
+    const bot = fakeBot()
+    startLive(context().ctx, CONFIG, new AbortController().signal, () => bot)
+    bot.authenticated()
+    bot.message(FRAME)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(await sendLiveReply(message({ text: `处理完成\n![截图](${image})\n[报告](${file})` }))).toBe('sent')
+    expect(bot.replies).toHaveLength(1)
+    expect(bot.replies[0]!.body).toEqual({ msgtype: 'markdown', markdown: { content: '处理完成' } })
+    expect(bot.uploads).toEqual([
+      { type: 'image', filename: 'shot.png', size: PNG.length },
+      { type: 'file', filename: 'report.pdf', size: 13 },
+    ])
+    expect(bot.sends.map(send => send.body)).toEqual([
+      { msgtype: 'image', image: { media_id: 'media-1' }, chat_type: 2 },
+      { msgtype: 'file', file: { media_id: 'media-2' }, chat_type: 2 },
+    ])
+  })
+
+  it('keeps an unreadable local link in the text and sends media without prose', async () => {
+    const bot = fakeBot()
+    startLive(context().ctx, CONFIG, new AbortController().signal, () => bot)
+    expect(await sendLiveReply(message({ text: '看这个 [缺失](/definitely/missing.png)' }))).toBe('sent')
+    expect(bot.sends[0]!.body).toEqual({
+      msgtype: 'markdown', markdown: { content: '看这个 [缺失](/definitely/missing.png)' }, chat_type: 2,
+    })
+    const directory = await mkdtemp(join(tmpdir(), 'wecom-live-reply-media-'))
+    const image = join(directory, 'only.png')
+    await writeFile(image, PNG)
+    expect(await sendLiveReply(message({ id: 'out-3', text: `![图](${image})` }))).toBe('sent')
+    expect(bot.sends).toHaveLength(2)
+    expect(bot.sends[1]!.body).toEqual({ msgtype: 'image', image: { media_id: 'media-1' }, chat_type: 2 })
+    expect(bot.uploads).toEqual([{ type: 'image', filename: 'only.png', size: PNG.length }])
   })
 
   it('uses the userid for an active direct send and reports a missing connection', async () => {

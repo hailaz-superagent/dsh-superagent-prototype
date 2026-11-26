@@ -7,6 +7,7 @@
  * because the @ event carries ids only.
  */
 import type { Trigger } from '../core/index.ts'
+import type { LiveMediaRef } from './wecom-live-image.ts'
 import { SOURCE, wecomTriggerId } from './wecom-shared.ts'
 import type { LiveFrame } from './wecom-live.ts'
 
@@ -24,13 +25,30 @@ export interface TopicTarget {
   parentReplyId?: string
 }
 
+/** One attachment of a post or comment; it carries a download URL and a cookie, not a media id. */
+export interface TopicMedia {
+  download_url?: string
+  /** Older or bridge-shaped payloads may use `url`. */
+  url?: string
+  file_name?: string
+  name?: string
+  cookie_name?: string
+  cookie_value?: string
+}
+
 /** The subset of a fetched post/reply this Source reads. */
 export interface TopicContent {
+  post_id?: string
+  reply_id?: string
   content?: string
   create_time?: number
   is_recalled?: boolean
   creator?: { userid?: string; type?: number } | null
   creator_info?: { userid?: string; type?: number } | null
+  /** Images attached to a post or comment. */
+  image_list?: TopicMedia[]
+  /** Files attached to a post or comment. */
+  inline_file_list?: TopicMedia[]
 }
 
 const MENTION = /\$\{inline_mention:[^}]*\}\u200b?/g
@@ -58,12 +76,40 @@ function creatorOf(content: TopicContent): { userid?: string; type?: number } | 
   return content.creator_info ?? named ?? undefined
 }
 
+/** Numbered media markers for a post or comment, downloaded by the runner before ingest. */
+export function topicMedia(content: TopicContent): LiveMediaRef[] {
+  const media: LiveMediaRef[] = []
+  const cookie = (item: TopicMedia): { name: string; value: string } | undefined =>
+    item.cookie_name ? { name: item.cookie_name, value: item.cookie_value ?? '' } : undefined
+  for (const image of content.image_list ?? []) {
+    const url = image.download_url ?? image.url
+    if (!url) continue
+    media.push({
+      key: `img_wecom_${media.length}`, marker: `[图片] img_wecom_${media.length}`, kind: 'image', url,
+      ...(cookie(image) ? { cookie: cookie(image) } : {}),
+    })
+  }
+  let files = 0
+  for (const file of content.inline_file_list ?? []) {
+    const url = file.download_url ?? file.url
+    if (!url) continue
+    const name = file.file_name ?? file.name
+    media.push({
+      key: `file_wecom_${files}`, marker: `[文件] file_wecom_${files}`, kind: 'file', url,
+      ...(name ? { name } : {}), ...(cookie(file) ? { cookie: cookie(file) } : {}),
+    })
+    files += 1
+  }
+  return media
+}
+
 /** Maps an @-in-channel event plus its fetched content to a Trigger. */
 export function liveTopicTrigger(frame: LiveFrame, target: TopicTarget, content: TopicContent | undefined): Trigger | undefined {
   if (!content || content.is_recalled) return undefined
   const creator = creatorOf(content)
   if (creator?.type === 1) return undefined
-  const text = cleanTopicText(content.content)
+  const media = topicMedia(content)
+  const text = [cleanTopicText(content.content), ...media.map(item => item.marker)].filter(Boolean).join('\n')
   if (!text) return undefined
   const body = frame.body as { msgid?: string; from?: { userid?: string }; create_time?: number } | undefined
   const userId = creator?.userid || body?.from?.userid || ''
@@ -91,6 +137,7 @@ export function liveTopicTrigger(frame: LiveFrame, target: TopicTarget, content:
     meta: {
       topicId: target.topicId, postId: target.postId,
       ...(target.replyId ? { parentReplyId: target.replyId } : {}), msgId: key, transport: LIVE_TOPIC_TRANSPORT,
+      ...(media.length ? { media } : {}),
     },
   }
 }

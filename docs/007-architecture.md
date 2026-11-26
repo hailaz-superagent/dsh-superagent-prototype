@@ -379,7 +379,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/wecom-image.ts` | Reads an image the WeCom bridge kept for a message as an attachment for the assessing Session |
 | `src/sources/wecom-live.ts` | The in-process AI Bot long connection: SDK adapter, callback and media mapping, passive/active reply sender, reconnect health and runner |
 | `src/sources/wecom-live-image.ts` | Downloads long-connection images, files and videos before their URLs expire, keeps them under the state directory, and reads images as attachments |
-| `src/sources/wecom-live-topic.ts` | Maps intercepted WeCom channel events to topic Threads and replies through the topic API |
+| `src/sources/wecom-live-reply.ts` | Turns absolute local Markdown links in a reply into uploaded WeCom image, file or video messages |
+| `src/sources/wecom-live-topic.ts` | Maps intercepted WeCom channel events to topic Threads, including their images and files, and replies through the topic API |
 | `src/wecom-watch.ts` | The WeCom plugin entry, exported as `./wecom-watch`: registers the kind and runs the configured bridge poller or long connection |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
@@ -418,7 +419,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/wecom.spec.ts` | The WeCom Source: Trigger mapping, Policy scope and admission rows, environment values, thread context, bridge response validation and cursor polling |
-| `tests/wecom-live.spec.ts` | The WeCom long connection: callback and media mapping, passive and active replies, runner lifecycle, credentials, SDK reconnect and a real WebSocket round trip |
+| `tests/wecom-live.spec.ts` | The WeCom long connection: callback, topic and outbound media mapping, passive and active replies, runner lifecycle, credentials, SDK reconnect and a real WebSocket round trip |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts`, `tests/wecom-image.spec.ts` | The Thread window of assessments, and Feishu and WeCom bridge image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |

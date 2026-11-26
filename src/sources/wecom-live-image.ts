@@ -26,6 +26,8 @@ export interface LiveMediaRef {
   url: string
   aeskey?: string
   name?: string
+  /** Channel attachments require the cookie returned with the post; ordinary messages do not. */
+  cookie?: { name: string; value: string }
 }
 
 /** Backwards-compatible alias for the image-only callers. */
@@ -80,6 +82,19 @@ export function liveImageType(data: Buffer): { mediaType: ImageMediaType; ext: s
 
 const safePart = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_')
 const DOWNLOAD_TIMEOUT_MS = 30_000
+
+/** Channel attachments are unencrypted but require the cookie that came with the post. */
+async function downloadWithCookie(url: string, cookie: { name: string; value: string }, signal: AbortSignal):
+  Promise<{ buffer: Buffer; filename?: string }> {
+  const response = await fetch(url, { signal, headers: { cookie: `${cookie.name}=${cookie.value}` } })
+  if (!response.ok) throw new Error(`channel media download failed with HTTP ${response.status}`)
+  const declared = Number(response.headers.get('content-length') ?? 0)
+  if (declared > MAX_LIVE_MEDIA_BYTES) throw new Error('media is too large')
+  const buffer = Buffer.from(await response.arrayBuffer())
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  return { buffer, ...(match?.[1] ? { filename: decodeURIComponent(match[1].trim()) } : {}) }
+}
 
 /** Bounds a download that the SDK does not cancel, so one slow media cannot hold the message chain forever. */
 async function withDeadline<T>(work: Promise<T>, signal: AbortSignal, ms = DOWNLOAD_TIMEOUT_MS): Promise<T> {
@@ -136,7 +151,9 @@ export async function prepareLiveMedia(ctx: Pick<SourceContext, 'deployment'>, b
       continue
     }
     try {
-      const { buffer, filename } = await withDeadline(bot.downloadFile(ref.url, ref.aeskey), signal)
+      const { buffer, filename } = await withDeadline(ref.cookie
+        ? downloadWithCookie(ref.url, ref.cookie, signal)
+        : bot.downloadFile(ref.url, ref.aeskey), signal)
       if (buffer.length === 0 || buffer.length > MAX_LIVE_MEDIA_BYTES) throw new Error('media is empty or too large')
       await mkdir(directory, { recursive: true, mode: 0o700 })
       if (ref.kind === 'image') {
