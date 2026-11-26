@@ -35,6 +35,13 @@ node scripts/weixin-login.mjs
 
 ### 2.2 Source 设置
 
+启用插件后，Sources 设置里会多出「个人微信」卡片；下面是在同一空配置下、启用前后截取的面板对比（基线为未包含本 Source 的构建）：
+
+| 启用前 | 启用后 |
+| --- | --- |
+| ![启用前](assets/weixin-source-before.png) | ![启用后](assets/weixin-source-after.png) |
+
+
 在面板的 Source 设置中启用「个人微信」，填写：
 
 | 字段 | 说明 |
