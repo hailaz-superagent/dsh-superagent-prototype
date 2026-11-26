@@ -10,7 +10,7 @@ import type { Trigger } from '../src/core/index.ts'
 import { getUpdates, parseWeixinJson, sendText, type WeixinMessage } from '../src/sources/weixin-api.ts'
 import { downloadWeixinMedia, parseWeixinAesKey, prepareWeixinMedia, weixinImageType, type WeixinMediaRef } from '../src/sources/weixin-media.ts'
 import {
-  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, clearWeixinQuotes, extractWeixinMedia, plainWeixinText, pollWeixinOnce, setWeixinSession, weixinAccountKey,
+  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, clearWeixinQuotes, extractWeixinMedia, plainWeixinText, pollWeixinOnce, sendWeixinReply, setWeixinSession, weixinAccountKey,
   weixinCredentials, weixinKind, weixinMessageParts, weixinThreadId, weixinTrigger, weixinTriggerId,
 } from '../src/sources/weixin.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -210,6 +210,16 @@ describe('Weixin protocol', () => {
   it('renders Markdown replies as plain WeChat text', () => {
     expect(plainWeixinText('**完成**：见 [PR #1](https://example.test/1)')).toBe('完成：见 PR #1 (https://example.test/1)')
     expect(plainWeixinText('## 标题\n`code`')).toBe('标题\ncode')
+  })
+
+  it('caches an outbound reply so quoting it later shows its text', async () => {
+    const url = await serve((_request, response) => json(response, { ret: 0, message_id: '9007199254740995' }))
+    const credentials = { baseUrl: url, token: 'secret', accountId: 'acct' }
+    await sendWeixinReply(credentials, { messageId: 'reply-quote', to: 'wx_alice', text: '这是要引用的回复' })
+    const trigger = weixinTrigger({
+      ...MESSAGE, message_id: '102', item_list: [{ type: 1, text_item: { text: '引用它' }, ref_msg: { svr_id: '9007199254740995' } }],
+    }, 'acct')
+    expect(trigger?.text).toBe('[引用] 这是要引用的回复\n引用它')
   })
 
   it('sends a Channel reply through the active credentials', async () => {

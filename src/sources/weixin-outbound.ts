@@ -11,6 +11,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { basename, extname, isAbsolute } from 'node:path'
 import { checkedImText } from '../infra/text.ts'
 import { sendItem, uploadMedia, type WeixinCredentials, type WeixinUpload } from './weixin-api.ts'
+import { rememberQuote, weixinAccountKey } from './weixin-quotes.ts'
 import { plainWeixinText } from './weixin-text.ts'
 
 /** One local file a reply names, classified by its extension. */
@@ -94,23 +95,26 @@ export async function sendWeixinReply(credentials: WeixinCredentials, input: {
   if (!input.to) return 'gone'
   const parts = extractWeixinMedia(input.text)
   const caption = plainWeixinText(parts.text).trim()
+  const account = weixinAccountKey(credentials)
   let index = 0
   if (caption) {
-    await sendItem(credentials, {
+    const sent = await sendItem(credentials, {
       to: input.to, item: { type: 1, text_item: { text: checkedImText(caption) } },
       ...input.contextToken ? { contextToken: input.contextToken } : {},
       clientId: clientId(input.messageId, index++), signal,
     })
+    if (sent) rememberQuote(account, input.to, sent, caption)
   }
   for (const media of parts.media) {
     const data = readFileSync(media.file)
     const upload = await uploadMedia(credentials, {
       data, to: input.to, mediaType: mediaType(media.kind), filename: media.name, signal,
     })
-    await sendItem(credentials, {
+    const sent = await sendItem(credentials, {
       to: input.to, item: mediaItem(media, upload), ...input.contextToken ? { contextToken: input.contextToken } : {},
       clientId: clientId(input.messageId, index++), signal,
     })
+    if (sent) rememberQuote(account, input.to, sent, media.kind === 'image' ? '[图片]' : `[${media.kind}] ${media.name}`)
   }
   if (!caption && parts.media.length === 0) {
     // A reply that became empty still needs a visible body.

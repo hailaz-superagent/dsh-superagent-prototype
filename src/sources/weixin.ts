@@ -6,7 +6,6 @@
  * messages, and `sendmessage` posts replies. A login file keeps the token out of
  * the settings database; the token field remains for deployments that paste it.
  */
-import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { z } from 'zod'
@@ -16,6 +15,7 @@ import { health, type Health, type SourceContext } from './host.ts'
 import { getUpdates, sendText, STALE_TOKEN_ERRCODE, type WeixinCredentials, type WeixinMessage } from './weixin-api.ts'
 import { prepareWeixinMedia, readWeixinImage, weixinImageKeys, WeixinAccountFileSchema, type WeixinMediaRef } from './weixin-media.ts'
 import { sendWeixinReply } from './weixin-outbound.ts'
+import { clearWeixinQuotes, recallQuote, rememberQuote, weixinAccountKey } from './weixin-quotes.ts'
 import { plainWeixinText } from './weixin-text.ts'
 import { pause } from './poll.ts'
 import { DEFAULT_BASE_URL, SOURCE, weixinThreadId, weixinTriggerId } from './weixin-shared.ts'
@@ -23,6 +23,7 @@ import type { ChannelLink, ContextPart, SourceChannel, SourceKind, SourcePolicyP
 
 export { SOURCE, weixinThreadId, weixinTriggerId } from './weixin-shared.ts'
 export { DEFAULT_BASE_URL } from './weixin-shared.ts'
+export { clearWeixinQuotes, weixinAccountKey } from './weixin-quotes.ts'
 export { STALE_TOKEN_ERRCODE, getUpdates, sendItem, parseWeixinJson, sendText, uploadMedia } from './weixin-api.ts'
 export type { WeixinUpload } from './weixin-api.ts'
 export { extractWeixinMedia, sendWeixinReply } from './weixin-outbound.ts'
@@ -90,25 +91,6 @@ const variables: readonly VariableSpec[] = [
   { key: 'DSH_SUPERAGENT_WEIXIN_CHAT', description: { zh: '触发工单的微信用户 id；不是来自个人微信时为空', en: 'The Weixin user that started the ticket; empty when the ticket did not start on personal WeChat' } },
   { key: 'DSH_SUPERAGENT_WEIXIN_ACCOUNT', description: { zh: '触发工单的微信用户 id', en: 'The Weixin user that started the ticket' } },
 ]
-
-/** In-process quote cache: message id to text, bounded per conversation, so an ID-only quote still shows its content. */
-const quotes = new Map<string, Map<string, string>>()
-const QUOTE_LIMIT = 500
-
-function rememberQuote(account: string, chat: string, id: string, text: string): void {
-  const bucket = `${account}:${chat}`
-  let entries = quotes.get(bucket)
-  if (!entries) { entries = new Map(); quotes.set(bucket, entries) }
-  entries.set(id, text)
-  if (entries.size > QUOTE_LIMIT) entries.delete(entries.keys().next().value as string)
-}
-
-function recallQuote(account: string, chat: string, id: string): string | undefined {
-  return quotes.get(`${account}:${chat}`)?.get(id)
-}
-
-/** Clears the quote cache; tests use it so one case cannot see another's messages. */
-export function clearWeixinQuotes(): void { quotes.clear() }
 
 interface Parts { text?: string; refs: WeixinMediaRef[] }
 
@@ -284,12 +266,6 @@ export function weixinCredentials(config: WeixinConfig, stateDir: string): Weixi
     baseUrl: /^https?:\/\//.test(base) ? base : `https://${base}`,
     ...config.accountId || file?.accountId ? { accountId: config.accountId || file?.accountId } : {},
   }
-}
-
-/** Stable cursor namespace when no account id is configured. */
-export function weixinAccountKey(credentials: WeixinCredentials): string {
-  if (credentials.accountId) return credentials.accountId
-  return createHash('sha256').update(credentials.token).digest('hex').slice(0, 16)
 }
 
 export async function pollWeixinOnce(ctx: PollContext, credentials: WeixinCredentials, config: WeixinConfig,
