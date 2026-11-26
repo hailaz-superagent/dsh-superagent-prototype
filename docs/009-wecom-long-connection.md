@@ -115,7 +115,7 @@ sendLiveReply()
 - `body.create_time`（秒）→ `at`；
 - `headers.req_id` → 被动回复用的 request id。
 
-读取前用 zod 校验；`${inline_mention:...}` 占位符和零宽空格会清理。
+读取前用 zod 校验；`${inline_mention:...}` 占位符和零宽空格会清理。语音消息使用企业微信返回的转写文本；转写为空或缺失时文本变成 `[语音消息，企业微信未提供转写文本]`，仍然创建 Trigger，避免静默丢消息（SDK 只给转写文本，不给音频）。
 
 图片在回调到达时立即用 SDK `downloadFile` 下载并解密（企业微信的图片 URL 只有约 5 分钟有效），按魔数校验 PNG/JPEG/WebP/GIF，限制 20MB，写入 `<stateDir>/wecom-live-media/<msgid>/<key>.<ext>`（目录 0700、文件 0600）。消息文本写成 `[图片] img_wecom_N`，图文混排按原顺序保留文本和图片；下载失败时该标记变成 `[图片不可用]`，消息本身不会丢。评估阶段 `threadContext.image` 读取文件并通过附件服务交给支持图片输入的模型；文本模型会明确拒绝。
 

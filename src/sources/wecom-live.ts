@@ -43,7 +43,7 @@ const LiveMessageSchema = z.object({
       image: LiveImageSchema.optional(),
     }).loose()),
   }).loose().optional(),
-  voice: z.object({ content: z.string() }).loose().optional(),
+  voice: z.object({ content: z.string().optional() }).loose().optional(),
   file: z.object({ name: z.string().optional() }).loose().optional(),
   video: z.object({ name: z.string().optional() }).loose().optional(),
 }).loose()
@@ -166,12 +166,16 @@ export interface LiveMessageParts { text?: string; images: LiveImageRef[] }
  * Images become numbered `[图片] img_wecom_N` markers with a reference the runner
  * downloads before the callback URL expires. Files and videos have no readable
  * content here; they become a marker so the agent can ask the person to resend or
- * describe them instead of silently losing the message.
+ * describe them instead of silently losing the message. A voice message without a
+ * transcription keeps a marker for the same reason: WeCom sends only the converted
+ * text, never the audio, so silence would otherwise look like a lost message.
  */
 export function liveMessageParts(body: LiveMessage): LiveMessageParts {
   const images: LiveImageRef[] = []
   if (body.msgtype === 'text') return { text: cleanLiveText(body.text?.content ?? '') || undefined, images }
-  if (body.msgtype === 'voice') return { text: cleanLiveText(body.voice?.content ?? '') || undefined, images }
+  if (body.msgtype === 'voice') {
+    return { text: cleanLiveText(body.voice?.content ?? '') || '[语音消息，企业微信未提供转写文本]', images }
+  }
   if (body.msgtype === 'image') {
     if (!body.image) return { images }
     const key = 'img_wecom_0'

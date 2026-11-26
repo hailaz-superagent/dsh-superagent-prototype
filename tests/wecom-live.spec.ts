@@ -157,6 +157,12 @@ describe('WeCom long-connection Trigger', () => {
       msgid: 'v', chattype: 'single', from: { userid: 'alice' }, msgtype: 'voice', voice: { content: '语音转写' },
     })).toBe('语音转写')
     expect(liveMessageText({
+      msgid: 'v2', chattype: 'single', from: { userid: 'alice' }, msgtype: 'voice', voice: { content: '  ' },
+    })).toBe('[语音消息，企业微信未提供转写文本]')
+    expect(liveTrigger({ headers: { req_id: 'req-v' }, body: {
+      msgid: 'msg-v', chattype: 'single', from: { userid: 'alice' }, msgtype: 'voice',
+    } })?.text).toBe('[语音消息，企业微信未提供转写文本]')
+    expect(liveMessageText({
       msgid: 'i', chattype: 'single', from: { userid: 'alice' }, msgtype: 'image', image: { url: 'https://example.invalid/i' },
     })).toBe('[图片] img_wecom_0')
     expect(liveTrigger({ headers: { req_id: 'req-4' }, body: {
