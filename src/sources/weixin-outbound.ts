@@ -69,7 +69,8 @@ function mediaItem(media: WeixinOutboundMedia, upload: WeixinUpload): Record<str
   const ref = {
     media: {
       encrypt_query_param: upload.downloadParam,
-      aes_key: Buffer.from(upload.aeskey, 'hex').toString('base64'),
+      // The gateway expects the base64 of the 32-char hex key, as the official plugin sends it.
+      aes_key: Buffer.from(upload.aeskey).toString('base64'),
       encrypt_type: 1,
     },
   }
