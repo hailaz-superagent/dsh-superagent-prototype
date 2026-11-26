@@ -108,9 +108,29 @@ src/weixin.ts channel.send()
 | 引用 `ref_msg` | ✅ | 有内联内容时直接渲染；只有 `svr_id` 时从进程内最近 500 条缓存还原，否则标记 `[引用消息内容未缓存]`。引用中的图片/文件/视频也会下载。 |
 | 机器人消息 | 跳过 | `message_type = 2` 不创建 Trigger，避免自回环。 |
 | 群聊 | 不支持 | 个人微信 Source 只处理单聊；群聊消息不作为工单来源。 |
-| 出站图片/文件 | 不支持 | 当前只发送文本；Markdown 会转成纯文本，回复受 IM 100 词限制。 |
+| 出站图片/视频/文件/语音 | ✅ | 回复里用 Markdown 图片/链接或 `MEDIA:` 指定本地绝对路径，发送时上传到微信 CDN；其余文本作为说明。单条 20MB。 |
 
 媒体保存在 `<stateDir>/weixin-media/<message id>/`（目录 0700、文件 0600）。下载失败不会丢消息：对应标记变成 `[图片不可用]`、`[文件不可用]` 或 `[视频不可用]`。
+
+### 4.1 出站媒体写法
+
+DSH 的回复正文是文本，因此用以下任一写法让 Source 把本地文件发到微信：
+
+```text
+看图 ![图表]（本地图片绝对路径）
+报告在 [report.pdf]（本地文件绝对路径）
+MEDIA:（本地视频绝对路径）
+```
+
+（示例中的中文括号是占位说明；实际写成 Markdown 图片、Markdown 链接或 `MEDIA:` 行，目标为本地绝对路径。）
+
+- 图片扩展名：png/jpg/jpeg/gif/webp → 图片消息；
+- mp4/mov/webm/mkv/avi → 视频消息；
+- mp3/ogg/wav/silk/amr → 语音消息；
+- 其他扩展名 → 文件消息；
+- 只接受存在的本地绝对路径（也接受 `file://`），URL 和相对路径保持为文本；
+- 上传前会按扩展名分类，AES-128-ECB 加密后 POST 到 CDN；单条上限 20MB；
+- 同一条回复先发剩余文本，再逐个发媒体；重试复用确定性的 `client_id`。
 
 ## 5. 可靠性与限制
 
@@ -123,7 +143,7 @@ src/weixin.ts channel.send()
 
 ## 6. 验证
 
-`tests/weixin.spec.ts` 覆盖：消息渲染与引用、Trigger/Policy/Scope/环境变量、凭证文件优先级、`uint64` 消息 id 解析、`getupdates`/`sendmessage` 请求与鉴权头、游标和 `context_token` 持久化、图片下载解密与不可用标记。
+`tests/weixin.spec.ts` 覆盖：消息渲染与引用、Trigger/Policy/Scope/环境变量、凭证文件优先级、`uint64` 消息 id 解析、`getupdates`/`sendmessage` 请求与鉴权头、游标和 `context_token` 持久化、图片下载解密与不可用标记、本地媒体提取与 CDN 上传后发送。
 
 ```sh
 pnpm exec vitest run tests/weixin.spec.ts

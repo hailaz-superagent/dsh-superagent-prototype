@@ -11,18 +11,22 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { z } from 'zod'
 import type { OutboundMessage, Trigger } from '../core/index.ts'
-import { checkedImText } from '../infra/text.ts'
 import { family } from '../kv.ts'
 import { health, type Health, type SourceContext } from './host.ts'
 import { getUpdates, sendText, STALE_TOKEN_ERRCODE, type WeixinCredentials, type WeixinMessage } from './weixin-api.ts'
 import { prepareWeixinMedia, readWeixinImage, weixinImageKeys, WeixinAccountFileSchema, type WeixinMediaRef } from './weixin-media.ts'
+import { sendWeixinReply } from './weixin-outbound.ts'
+import { plainWeixinText } from './weixin-text.ts'
 import { pause } from './poll.ts'
 import { DEFAULT_BASE_URL, SOURCE, weixinThreadId, weixinTriggerId } from './weixin-shared.ts'
 import type { ChannelLink, ContextPart, SourceChannel, SourceKind, SourcePolicyPart, ThreadContext, VariableSpec } from './kind.ts'
 
 export { SOURCE, weixinThreadId, weixinTriggerId } from './weixin-shared.ts'
 export { DEFAULT_BASE_URL } from './weixin-shared.ts'
-export { STALE_TOKEN_ERRCODE, getUpdates, parseWeixinJson, sendText } from './weixin-api.ts'
+export { STALE_TOKEN_ERRCODE, getUpdates, sendItem, parseWeixinJson, sendText, uploadMedia } from './weixin-api.ts'
+export type { WeixinUpload } from './weixin-api.ts'
+export { extractWeixinMedia, sendWeixinReply } from './weixin-outbound.ts'
+export { plainWeixinText } from './weixin-text.ts'
 export type { WeixinCredentials, WeixinMessage } from './weixin-api.ts'
 
 /** Opaque long-poll cursor, per account, so a token or account change starts from a fresh gateway buffer. */
@@ -247,25 +251,15 @@ const threadContext: ThreadContext<WeixinConfig> = {
 let active: WeixinCredentials | undefined
 export function setWeixinSession(credentials: WeixinCredentials | undefined): void { active = credentials }
 
-/** Personal WeChat renders plain text; remove the most visible Markdown syntax while keeping links readable. */
-export function plainWeixinText(text: string): string {
-  return text
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1 $2')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
-    .replace(/```[a-zA-Z0-9]*\n?/g, '')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*\n]+)\*/g, '$1')
-}
-
 const channel: SourceChannel<WeixinConfig> = {
   async send(_host, message: OutboundMessage) {
     if (!active) throw new Error('The Weixin Source is not connected')
     const { userId, contextToken } = message.channel.address
     if (!userId) return 'gone'
-    await sendText(active, { to: userId, text: checkedImText(plainWeixinText(message.text)), ...contextToken ? { contextToken } : {} })
-    return 'sent'
+    return sendWeixinReply(active, {
+      messageId: message.id, to: userId, text: message.text,
+      ...contextToken ? { contextToken } : {},
+    })
   },
   link(address: Record<string, string>): ChannelLink {
     return {

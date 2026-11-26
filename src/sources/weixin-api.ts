@@ -4,9 +4,9 @@
  * `@tencent-weixin/openclaw-weixin`, so an account connected by that plugin can
  * also be read by this Source when no other process holds the same token.
  */
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createCipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { DEFAULT_BASE_URL, ILINK_APP_ID, ILINK_CLIENT_VERSION } from './weixin-shared.ts'
+import { DEFAULT_BASE_URL, DEFAULT_CDN_URL, ILINK_APP_ID, ILINK_CLIENT_VERSION } from './weixin-shared.ts'
 
 /** Credentials resolved from the Source settings or its login file. */
 export interface WeixinCredentials { baseUrl: string; token: string; accountId?: string }
@@ -163,21 +163,78 @@ export async function getUpdates(cred: WeixinCredentials, buffer: string, signal
   }
 }
 
-/** Sends one plain text message to `to`, echoing the conversation's latest `context_token`. */
-export async function sendText(cred: WeixinCredentials, input: { to: string; text: string; contextToken?: string },
-  signal?: AbortSignal): Promise<string | undefined> {
+/** Sends one message item to `to`, echoing the conversation's latest `context_token`. */
+export async function sendItem(cred: WeixinCredentials, input: {
+  to: string; item: Record<string, unknown>; contextToken?: string; clientId?: string; signal?: AbortSignal
+}): Promise<string | undefined> {
   const text = await post(cred, 'ilink/bot/sendmessage', {
     msg: {
-      from_user_id: '', to_user_id: input.to, client_id: `dsh-superagent:${Date.now()}-${randomUUID().slice(0, 8)}`,
-      message_type: 2, message_state: 2,
-      item_list: [{ type: 1, text_item: { text: input.text } }],
+      from_user_id: '', to_user_id: input.to,
+      client_id: input.clientId ?? `dsh-superagent:${Date.now()}-${randomUUID().slice(0, 8)}`,
+      message_type: 2, message_state: 2, item_list: [input.item],
       ...input.contextToken ? { context_token: input.contextToken } : {},
     },
-  }, signal)
+  }, input.signal)
   const response = z.object({ ret: z.number().optional(), errmsg: z.string().optional(), message_id: z.string().optional() }).loose()
     .parse(parseWeixinJson(text))
   if (response.ret !== undefined && response.ret !== 0) throw new Error(`sendmessage ret=${response.ret} ${response.errmsg ?? ''}`.trim())
   return response.message_id
+}
+
+/** Sends one plain text message. */
+export async function sendText(cred: WeixinCredentials, input: { to: string; text: string; contextToken?: string },
+  signal?: AbortSignal): Promise<string | undefined> {
+  return sendItem(cred, { to: input.to, item: { type: 1, text_item: { text: input.text } },
+    ...input.contextToken ? { contextToken: input.contextToken } : {}, signal })
+}
+
+/** One uploaded object: its CDN download parameter, AES key and plaintext/cipher sizes. */
+export interface WeixinUpload { downloadParam: string; aeskey: string; rawSize: number; cipherSize: number }
+
+function encrypt(data: Buffer, key: Buffer): Buffer {
+  const cipher = createCipheriv('aes-128-ecb', key, null)
+  return Buffer.concat([cipher.update(data), cipher.final()])
+}
+
+const paddedSize = (size: number): number => Math.ceil((size + 1) / 16) * 16
+
+/** Uploads one file to the Weixin CDN with AES-128-ECB, as the official plugin does. */
+export async function uploadMedia(cred: WeixinCredentials, input: {
+  data: Buffer; to: string; mediaType: number; filename: string; signal?: AbortSignal
+}): Promise<WeixinUpload> {
+  const rawSize = input.data.length
+  if (rawSize === 0 || rawSize > 20 * 1024 * 1024) throw new Error('outbound media is empty or exceeds 20 MB')
+  const filekey = randomBytes(16).toString('hex')
+  const aeskey = randomBytes(16)
+  const cipherSize = paddedSize(rawSize)
+  const info = GetUpdatesRespSchema.pick({ ret: true, errmsg: true }).extend({
+    upload_full_url: z.string().optional(), upload_param: z.string().optional(),
+  }).loose().parse(parseWeixinJson(await post(cred, 'ilink/bot/getuploadurl', {
+    filekey, media_type: input.mediaType, to_user_id: input.to, rawsize: rawSize,
+    rawfilemd5: createHash('md5').update(input.data).digest('hex'), filesize: cipherSize,
+    no_need_thumb: true, aeskey: aeskey.toString('hex'),
+  }, input.signal)))
+  const uploadUrl = info.upload_full_url?.trim() || (info.upload_param
+    ? `${DEFAULT_CDN_URL}/upload?encrypted_query_param=${encodeURIComponent(info.upload_param)}&filekey=${encodeURIComponent(filekey)}`
+    : '')
+  if (!uploadUrl) throw new Error('getuploadurl returned no upload URL')
+  const body = encrypt(input.data, aeskey)
+  let last: unknown
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(uploadUrl, {
+        method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(body), signal: input.signal,
+      })
+      if (response.status !== 200) throw new Error(`CDN upload returned HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`)
+      const downloadParam = response.headers.get('x-encrypted-param')
+      if (!downloadParam) throw new Error('CDN upload response has no x-encrypted-param header')
+      return { downloadParam, aeskey: aeskey.toString('hex'), rawSize, cipherSize }
+    } catch (error) {
+      last = error
+      if (input.signal?.aborted) throw error
+    }
+  }
+  throw last instanceof Error ? last : new Error('CDN upload failed')
 }
 
 /** Re-exports for tests that build a credential literal without repeating the default. */

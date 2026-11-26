@@ -10,7 +10,7 @@ import type { Trigger } from '../src/core/index.ts'
 import { getUpdates, parseWeixinJson, sendText, type WeixinMessage } from '../src/sources/weixin-api.ts'
 import { downloadWeixinMedia, parseWeixinAesKey, prepareWeixinMedia, weixinImageType, type WeixinMediaRef } from '../src/sources/weixin-media.ts'
 import {
-  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, clearWeixinQuotes, plainWeixinText, pollWeixinOnce, setWeixinSession, weixinAccountKey,
+  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, clearWeixinQuotes, extractWeixinMedia, plainWeixinText, pollWeixinOnce, setWeixinSession, weixinAccountKey,
   weixinCredentials, weixinKind, weixinMessageParts, weixinThreadId, weixinTrigger, weixinTriggerId,
 } from '../src/sources/weixin.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -173,6 +173,38 @@ describe('Weixin protocol', () => {
     expect(page.msgs?.[0]?.message_id).toBe('9007199254740993')
     await expect(sendText(credentials, { to: 'wx_alice', text: '回复', contextToken: 'ctx-1' })).resolves.toBe('9007199254740994')
     expect(sent).toMatchObject({ msg: { to_user_id: 'wx_alice', context_token: 'ctx-1', message_type: 2, item_list: [{ type: 1, text_item: { text: '回复' } }] } })
+  })
+
+  it('extracts local image, file and MEDIA paths and leaves URLs alone', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'weixin-')); directories.push(directory)
+    const image = join(directory, 'chart.png'); writeFileSync(image, IMAGE)
+    const file = join(directory, 'report.pdf'); writeFileSync(file, Buffer.from('%PDF-1.4'))
+    const parts = extractWeixinMedia(`看图 ![图表](${image})\nMEDIA: ${file}\n[链接](https://example.test)`)
+    expect(parts.text).toContain('[链接](https://example.test)')
+    expect(parts.media.map(item => [item.kind, item.name])).toEqual([['image', 'chart.png'], ['file', 'report.pdf']])
+    expect(extractWeixinMedia('![x](https://example.test/a.png)').media).toEqual([])
+  })
+
+  it('uploads a local image and sends it after the caption', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'weixin-')); directories.push(directory)
+    const image = join(directory, 'chart.png'); writeFileSync(image, IMAGE)
+    const sent: Record<string, unknown>[] = []
+    const url = await serve((request, response, body) => {
+      if (request.url?.endsWith('/ilink/bot/getuploadurl')) { json(response, { ret: 0, upload_full_url: `${url}/upload` }); return }
+      if (request.url === '/upload') { response.writeHead(200, { 'x-encrypted-param': 'download-param' }); response.end(); return }
+      if (request.url?.endsWith('/ilink/bot/sendmessage')) { sent.push(JSON.parse(body) as Record<string, unknown>); json(response, { ret: 0 }); return }
+      response.writeHead(404); response.end()
+    })
+    setWeixinSession({ baseUrl: url, token: 'secret' })
+    try {
+      await expect(weixinKind.channel?.send({} as never, {
+        id: 'reply-image', kind: 'reply', text: `看图 ![图表](${image})`,
+        channel: { source: 'weixin', thread: 'weixin:direct:wx_alice', address: { userId: 'wx_alice', contextToken: 'ctx-1' } },
+      })).resolves.toBe('sent')
+    } finally { setWeixinSession(undefined) }
+    expect(sent).toHaveLength(2)
+    expect(sent[0]).toMatchObject({ msg: { item_list: [{ type: 1, text_item: { text: '看图' } }] } })
+    expect(sent[1]).toMatchObject({ msg: { item_list: [{ type: 2, image_item: { media: { encrypt_query_param: 'download-param', encrypt_type: 1 }, mid_size: 16 } }] } })
   })
 
   it('renders Markdown replies as plain WeChat text', () => {

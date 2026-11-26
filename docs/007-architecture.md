@@ -379,6 +379,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/weixin-api.ts` | The iLink bot HTTP client: `getupdates` long poll, `sendmessage`, lossless uint64 message ids and the request headers |
 | `src/sources/weixin-media.ts` | Inbound WeChat media: CDN download, AES-128-ECB decryption, 20 MB cap, saved image attachments and the login-file schema |
 | `src/sources/weixin.ts` | The personal WeChat kind: Trigger mapping, quote cache, Policy/scope, Channel, credentials, health and the poll loop |
+| `src/sources/weixin-text.ts` | Personal WeChat plain-text rendering of Markdown replies |
+| `src/sources/weixin-outbound.ts` | Outbound WeChat media: local Markdown/`MEDIA:` paths into uploaded image, video, voice and file items |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
