@@ -12,8 +12,14 @@ export {
   LIVE_TRANSPORT, PASSIVE_WINDOW_MS, liveBot, liveMessageParts, liveMessageText, liveTrigger, sendLiveReply, setLiveBot, startLive,
 } from './sources/wecom-live.ts'
 export type { LiveBot, LiveCredentials, LiveFrame, LiveMessage, LiveMessageParts, LiveRun } from './sources/wecom-live.ts'
-export { MAX_LIVE_IMAGE_BYTES, liveImageType, prepareLiveImages, readLiveWecomImage } from './sources/wecom-live-image.ts'
-export type { LiveImageDownloader, LiveImageFile, LiveImageRef } from './sources/wecom-live-image.ts'
+export {
+  MAX_LIVE_IMAGE_BYTES, MAX_LIVE_MEDIA_BYTES, liveImageType, prepareLiveImages, prepareLiveMedia, readLiveWecomImage,
+} from './sources/wecom-live-image.ts'
+export type { LiveImageDownloader, LiveImageFile, LiveImageRef, LiveMediaDownloader, LiveMediaRef, LiveStoredMedia } from './sources/wecom-live-image.ts'
+export {
+  LIVE_TOPIC_TRANSPORT, TOPIC_EVENT_CALLBACK, cleanTopicText, liveTopicTrigger, topicTarget,
+} from './sources/wecom-live-topic.ts'
+export type { TopicContent, TopicTarget } from './sources/wecom-live-topic.ts'
 
 export const name = 'dsh-superagent-wecom'
 export const inject = ['orchestrator']

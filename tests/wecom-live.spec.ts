@@ -15,6 +15,7 @@ import {
   type LiveBot, type LiveFrame,
 } from '../src/sources/wecom-live.ts'
 import { liveImageType, readLiveWecomImage } from '../src/sources/wecom-live-image.ts'
+import { LIVE_TOPIC_TRANSPORT } from '../src/sources/wecom-live-topic.ts'
 import { SOURCE, wecomTriggerId } from '../src/sources/wecom-shared.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -41,11 +42,13 @@ interface FakeBot extends LiveBot {
   readonly replies: { requestId: string; body: Record<string, unknown> }[]
   readonly sends: { chatId: string; body: Record<string, unknown> }[]
   readonly downloads: { url: string; aesKey?: string }[]
+  readonly topicSends: { target: { topicId: string; postId: string; parentReplyId?: string }; content: string }[]
   readonly state: { connected: boolean; connects: number; disconnects: number; download: 'ok' | 'fail' }
   authenticated(): void
   disconnected(reason?: string): void
   failed(error: unknown): void
   message(frame: LiveFrame): void
+  topic(frame: LiveFrame): void
 }
 
 function fakeBot(): FakeBot {
@@ -53,17 +56,20 @@ function fakeBot(): FakeBot {
   let onDisconnected: ((reason: string) => void) | undefined
   let onError: ((error: unknown) => void) | undefined
   let onMessage: ((frame: LiveFrame) => void) | undefined
+  let onTopic: ((frame: LiveFrame) => void) | undefined
   const state = { connected: false, connects: 0, disconnects: 0, download: 'ok' as 'ok' | 'fail' }
   const replies: { requestId: string; body: Record<string, unknown> }[] = []
   const sends: { chatId: string; body: Record<string, unknown> }[] = []
   const downloads: { url: string; aesKey?: string }[] = []
+  const topicSends: { target: { topicId: string; postId: string; parentReplyId?: string }; content: string }[] = []
   return {
     get connected() { return state.connected },
-    state, replies, sends, downloads,
+    state, replies, sends, downloads, topicSends,
     onAuthenticated(handler) { onAuthenticated = handler },
     onDisconnected(handler) { onDisconnected = handler },
     onError(handler) { onError = handler },
     onMessage(handler) { onMessage = handler },
+    onTopic(handler) { onTopic = handler },
     connect() { state.connects += 1; state.connected = true },
     disconnect() { state.disconnects += 1; state.connected = false },
     async reply(requestId, body) { replies.push({ requestId, body }) },
@@ -73,10 +79,18 @@ function fakeBot(): FakeBot {
       if (state.download === 'fail') throw new Error('download failed')
       return { buffer: PNG, filename: 'photo.png' }
     },
+    async topicPost(_topicId, postId) {
+      return { post_id: postId, content: '频道帖子内容', create_time: 1_700_000_000, creator: { userid: 'alice' } }
+    },
+    async topicReplyContent(_topicId, _postId, replyId) {
+      return { reply_id: replyId, content: '频道评论内容', create_time: 1_700_000_100, creator: { userid: 'alice' } }
+    },
+    async sendTopicReply(target, content) { topicSends.push({ target, content }) },
     authenticated() { onAuthenticated?.() },
     disconnected(reason = 'network') { state.connected = false; onDisconnected?.(reason) },
     failed(error) { onError?.(error) },
     message(frame) { onMessage?.(frame) },
+    topic(frame) { onTopic?.(frame) },
   }
 }
 
@@ -167,10 +181,21 @@ describe('WeCom long-connection Trigger', () => {
     })).toBe('[图片] img_wecom_0')
     expect(liveTrigger({ headers: { req_id: 'req-4' }, body: {
       ...MESSAGE, msgid: 'msg-i', msgtype: 'image', image: { url: 'https://example.invalid/i', aeskey: 'k' },
-    } })?.meta.images).toEqual([{ key: 'img_wecom_0', url: 'https://example.invalid/i', aeskey: 'k' }])
+    } })?.meta.media).toEqual([{ key: 'img_wecom_0', marker: '[图片] img_wecom_0', kind: 'image', url: 'https://example.invalid/i', aeskey: 'k' }])
     expect(liveMessageText({
-      msgid: 'f', chattype: 'single', from: { userid: 'alice' }, msgtype: 'file', file: { name: 'report.pdf' },
-    })).toBe('[文件] report.pdf')
+      msgid: 'f', chattype: 'single', from: { userid: 'alice' }, msgtype: 'file',
+      file: { name: 'report.pdf', url: 'https://example.invalid/f' },
+    })).toBe('[文件] file_wecom_0')
+    expect(liveMessageText({
+      msgid: 'vid', chattype: 'single', from: { userid: 'alice' }, msgtype: 'video',
+      video: { name: 'demo.mp4', url: 'https://example.invalid/v' },
+    })).toBe('[视频] video_wecom_0')
+    const quoted = liveMessageParts({
+      msgid: 'q', chattype: 'single', from: { userid: 'alice' }, msgtype: 'text', text: { content: '看这个' },
+      quote: { msgtype: 'image', image: { url: 'https://example.invalid/q', aeskey: 'qk' } },
+    })
+    expect(quoted.text).toBe('[引用] [引用图片] img_wecom_0\n看这个')
+    expect(quoted.images).toEqual([{ key: 'img_wecom_0', marker: '[引用图片] img_wecom_0', kind: 'image', url: 'https://example.invalid/q', aeskey: 'qk' }])
   })
 
   it('refuses a malformed callback instead of creating a Trigger', () => {
@@ -192,9 +217,49 @@ describe('WeCom long-connection Trigger', () => {
     })
     expect(parts.text).toBe('第一行\n[图片] img_wecom_0\n第二行\n[图片] img_wecom_1')
     expect(parts.images).toEqual([
-      { key: 'img_wecom_0', url: 'https://example.invalid/0', aeskey: 'a0' },
-      { key: 'img_wecom_1', url: 'https://example.invalid/1' },
+      { key: 'img_wecom_0', marker: '[图片] img_wecom_0', kind: 'image', url: 'https://example.invalid/0', aeskey: 'a0' },
+      { key: 'img_wecom_1', marker: '[图片] img_wecom_1', kind: 'image', url: 'https://example.invalid/1' },
     ])
+  })
+})
+
+describe('WeCom long-connection channels', () => {
+  it('fetches an @ post and replies through the topic API', async () => {
+    const bot = fakeBot()
+    const { ctx, received } = context()
+    const run = startLive(ctx, CONFIG, new AbortController().signal, () => bot)
+    bot.topic({ headers: { req_id: 'req-t' }, body: {
+      msgid: 'tm-1', topic_id: 't1', from: { userid: 'alice' }, create_time: 1_700_000_000, msgtype: 'event',
+      event: { eventtype: 'topic_at_bot', topic_at_bot: { post_id: 'p1' } },
+    } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(received).toHaveLength(1)
+    expect(received[0]).toMatchObject({ text: '频道帖子内容', addressed: 'mention' })
+    expect(received[0]!.threads).toEqual([{ source: SOURCE, id: 'topic:t1' }])
+    expect(received[0]!.channel?.address).toMatchObject({
+      transport: LIVE_TOPIC_TRANSPORT, topicId: 't1', postId: 'p1',
+    })
+    expect(await sendLiveReply(message({ channel: received[0]!.channel! }))).toBe('sent')
+    expect(bot.topicSends).toEqual([{ target: { topicId: 't1', postId: 'p1' }, content: '收到，正在处理' }])
+    await run.stop()
+  })
+
+  it('maps a comment reply with its parent reply id', async () => {
+    const bot = fakeBot()
+    const { ctx, received } = context()
+    const run = startLive(ctx, CONFIG, new AbortController().signal, () => bot)
+    bot.topic({ headers: { req_id: 'req-t2' }, body: {
+      msgid: 'tm-2', topic_id: 't1', from: { userid: 'alice' }, create_time: 1_700_000_000, msgtype: 'event',
+      event: { eventtype: 'topic_at_bot', topic_at_bot: { post_id: 'p1', reply_id: 'r1' } },
+    } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(received[0]).toMatchObject({ text: '频道评论内容' })
+    expect(received[0]!.channel?.address).toMatchObject({
+      transport: LIVE_TOPIC_TRANSPORT, topicId: 't1', postId: 'p1', parentReplyId: 'r1',
+    })
+    await sendLiveReply(message({ channel: received[0]!.channel! }))
+    expect(bot.topicSends[0]!.target).toEqual({ topicId: 't1', postId: 'p1', parentReplyId: 'r1' })
+    await run.stop()
   })
 })
 
@@ -282,6 +347,33 @@ describe('WeCom long-connection images', () => {
       .resolves.toMatchObject({ source_message_id: 'msg-i', image_key: 'img_wecom_0' })
     expect(saveImage).toHaveBeenCalledWith({ data: PNG, mediaType: 'image/png', name: 'img_wecom_0.png' })
     expect(liveImageType(PNG)).toEqual({ mediaType: 'image/png', ext: '.png' })
+  })
+
+  it('downloads a file and an image quoted in a text message', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'wecom-live-media-'))
+    const bot = fakeBot()
+    const { ctx, received } = context(CONFIG, testDeployment({ stateDir: directory }))
+    const run = startLive(ctx, CONFIG, new AbortController().signal, () => bot)
+    bot.message({ headers: { req_id: 'req-f' }, body: {
+      ...MESSAGE, msgid: 'msg-file', msgtype: 'file',
+      file: { url: 'https://example.invalid/f', aeskey: 'fk', name: 'report.pdf' },
+    } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const fileTrigger = received[0]!
+    expect(fileTrigger.text).toMatch(/^\[文件\] report\.pdf（已保存：.*file_wecom_0\.png）$/)
+    const media = fileTrigger.meta.media as { key: string; kind: string; file: string; size: number }[]
+    expect(media[0]).toMatchObject({ key: 'file_wecom_0', kind: 'file', size: PNG.length })
+    expect(await readFile(media[0]!.file)).toEqual(PNG)
+
+    bot.message({ headers: { req_id: 'req-q' }, body: {
+      ...MESSAGE, msgid: 'msg-quote', msgtype: 'text', text: { content: '看这个' },
+      quote: { msgtype: 'image', image: { url: 'https://example.invalid/q' } },
+    } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const quoteTrigger = received[1]!
+    expect(quoteTrigger.text).toBe('[引用] [引用图片] img_wecom_0\n看这个')
+    expect((quoteTrigger.meta.images as { key: string }[])[0]?.key).toBe('img_wecom_0')
+    await run.stop()
   })
 
   it('marks a failed download and refuses a key that is not in the message', async () => {

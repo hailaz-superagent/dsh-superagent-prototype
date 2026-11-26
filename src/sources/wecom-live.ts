@@ -6,13 +6,14 @@
  * heartbeats and exponential-backoff reconnects, so no separate process, public
  * callback URL or polling is involved.
  */
-import { WSClient, type WsFrame } from '@wecom/aibot-node-sdk'
+import { WSClient, generateReqId, type WsFrame } from '@wecom/aibot-node-sdk'
 import { z } from 'zod'
 import type { OutboundMessage, Trigger } from '../core/index.ts'
 import { checkedImText } from '../infra/text.ts'
 import { health, type SourceContext } from './host.ts'
-import { prepareLiveImages, type LiveImageRef } from './wecom-live-image.ts'
+import { prepareLiveMedia, type LiveMediaRef } from './wecom-live-image.ts'
 import { SOURCE, wecomTriggerId } from './wecom-shared.ts'
+import { LIVE_TOPIC_TRANSPORT, TOPIC_EVENT_CALLBACK, liveTopicTrigger, topicTarget, type TopicContent, type TopicTarget } from './wecom-live-topic.ts'
 import type { WecomConfig } from './wecom.ts'
 
 /** Address marker that routes a reply through the in-process long connection. */
@@ -22,9 +23,29 @@ export const PASSIVE_WINDOW_MS = 4_000
 /** Drop cached callback ids that can no longer be used for a passive reply. */
 const CALLBACK_TTL_MS = 5 * 60_000
 
-const LiveImageSchema = z.object({
-  url: z.string().min(1),
+const LiveMediaSchema = z.object({
+  url: z.string().min(1).optional(),
   aeskey: z.string().optional(),
+  name: z.string().optional(),
+}).loose()
+
+const LiveMixedItemSchema = z.object({
+  msgtype: z.string(),
+  text: z.object({ content: z.string() }).loose().optional(),
+  image: LiveMediaSchema.optional(),
+}).loose()
+
+const LiveTextSchema = z.object({ content: z.string() }).loose()
+const LiveVoiceSchema = z.object({ content: z.string().optional() }).loose()
+
+const LiveQuoteSchema = z.object({
+  msgtype: z.string(),
+  text: LiveTextSchema.optional(),
+  image: LiveMediaSchema.optional(),
+  mixed: z.object({ msg_item: z.array(LiveMixedItemSchema) }).loose().optional(),
+  voice: LiveVoiceSchema.optional(),
+  file: LiveMediaSchema.optional(),
+  video: LiveMediaSchema.optional(),
 }).loose()
 
 const LiveMessageSchema = z.object({
@@ -34,18 +55,13 @@ const LiveMessageSchema = z.object({
   from: z.object({ userid: z.string().min(1) }).loose(),
   create_time: z.number().optional(),
   msgtype: z.string(),
-  text: z.object({ content: z.string() }).loose().optional(),
-  image: LiveImageSchema.optional(),
-  mixed: z.object({
-    msg_item: z.array(z.object({
-      msgtype: z.string(),
-      text: z.object({ content: z.string() }).loose().optional(),
-      image: LiveImageSchema.optional(),
-    }).loose()),
-  }).loose().optional(),
-  voice: z.object({ content: z.string().optional() }).loose().optional(),
-  file: z.object({ name: z.string().optional() }).loose().optional(),
-  video: z.object({ name: z.string().optional() }).loose().optional(),
+  text: LiveTextSchema.optional(),
+  image: LiveMediaSchema.optional(),
+  mixed: z.object({ msg_item: z.array(LiveMixedItemSchema) }).loose().optional(),
+  voice: LiveVoiceSchema.optional(),
+  file: LiveMediaSchema.optional(),
+  video: LiveMediaSchema.optional(),
+  quote: LiveQuoteSchema.optional(),
 }).loose()
 export type LiveMessage = z.infer<typeof LiveMessageSchema>
 
@@ -63,11 +79,15 @@ export interface LiveBot {
   onDisconnected(handler: (reason: string) => void): void
   onError(handler: (error: unknown) => void): void
   onMessage(handler: (frame: LiveFrame) => void): void
+  onTopic(handler: (frame: LiveFrame) => void): void
   connect(): void
   disconnect(): void
   reply(requestId: string, body: Record<string, unknown>): Promise<void>
   sendMessage(chatId: string, body: Record<string, unknown>): Promise<void>
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Buffer; filename?: string }>
+  topicPost(topicId: string, postId: string): Promise<TopicContent | undefined>
+  topicReplyContent(topicId: string, postId: string, replyId: string): Promise<TopicContent | undefined>
+  sendTopicReply(target: TopicTarget, content: string): Promise<void>
 }
 
 /** Options accepted by the real SDK adapter. */
@@ -120,6 +140,25 @@ export function sdkLiveBot(config: LiveCredentials): LiveBot {
     requestTimeout: 15_000,
     logger: silentLogger,
   })
+  let topicHandler: ((frame: LiveFrame) => void) | undefined
+  const installTopic = (): void => {
+    const manager = (client as unknown as {
+      wsManager?: { handleFrame?: (frame: WsFrame) => void; __dshTopicPatched?: boolean }
+    }).wsManager
+    if (!manager || typeof manager.handleFrame !== 'function') {
+      throw new Error('aibot-node-sdk internals changed: wsManager.handleFrame is unavailable')
+    }
+    if (manager.__dshTopicPatched) return
+    const original = manager.handleFrame.bind(manager)
+    manager.handleFrame = (frame: WsFrame) => {
+      if ((frame as { cmd?: string }).cmd === TOPIC_EVENT_CALLBACK) {
+        if (topicHandler) topicHandler(frame as LiveFrame)
+        return
+      }
+      original(frame)
+    }
+    manager.__dshTopicPatched = true
+  }
   return {
     get connected() { return client.isConnected === true },
     onAuthenticated(handler) { client.on('authenticated', handler) },
@@ -130,7 +169,12 @@ export function sdkLiveBot(config: LiveCredentials): LiveBot {
         client.on(event, (frame: WsFrame) => handler(frame as LiveFrame))
       }
     },
-    connect() { client.connect() },
+    onTopic(handler) { topicHandler = handler },
+    connect() {
+      client.connect()
+      if (!topicHandler) return
+      try { installTopic() } catch (error) { client.emit('error', error as Error) }
+    },
     disconnect() { client.disconnect() },
     async reply(requestId, body) {
       try {
@@ -149,6 +193,34 @@ export function sdkLiveBot(config: LiveCredentials): LiveBot {
       }
     },
     downloadFile(url, aesKey) { return client.downloadFile(url, aesKey) },
+    async topicPost(topicId, postId) {
+      const body = await topicCall('aibot_topic_get_post_list', { topic_id: topicId, post_id_list: [postId] })
+      return (body?.post_list as TopicContent[] | undefined)?.[0]
+    },
+    async topicReplyContent(topicId, postId, replyId) {
+      const body = await topicCall('aibot_topic_get_reply_list', {
+        topic_id: topicId, post_id: postId, reply_id_list: [replyId],
+      })
+      return (body?.reply_list as TopicContent[] | undefined)?.[0]
+    },
+    async sendTopicReply(target, content) {
+      const body: Record<string, unknown> = { topic_id: target.topicId, post_id: target.postId, content }
+      const parent = target.parentReplyId ?? target.replyId
+      if (parent) body.parent_reply_id = parent
+      await topicCall('aibot_topic_send_reply', body)
+    },
+  }
+
+  async function topicCall(cmd: string, body: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
+    try {
+      const ack = await client.reply({ headers: { req_id: generateReqId(cmd) } }, body, cmd)
+      if (ack.errcode !== undefined && ack.errcode !== 0) {
+        throw new Error(`${cmd} failed: ${ack.errmsg ?? 'unknown error'} (code ${ack.errcode})`)
+      }
+      return (ack as { body?: Record<string, unknown> }).body
+    } catch (error) {
+      throw ackError(cmd, error)
+    }
   }
 }
 
@@ -157,51 +229,100 @@ export function cleanLiveText(text: string): string {
   return text.replace(/\$\{inline_mention:[^}]*\}\u200b?/g, '').trim()
 }
 
-/** Text and image references extracted from one callback. */
-export interface LiveMessageParts { text?: string; images: LiveImageRef[] }
+/** Text and media references extracted from one callback. */
+export interface LiveMessageParts { text?: string; images: LiveMediaRef[]; media: LiveMediaRef[] }
+
+const mediaLabel = (kind: LiveMediaRef['kind']): string =>
+  kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文件'
+
+function imageRef(image: { url?: string; aeskey?: string } | undefined, index: number,
+  label = '[图片]'): LiveMediaRef | undefined {
+  if (!image) return undefined
+  return {
+    key: `img_wecom_${index}`, marker: `${label} img_wecom_${index}`, kind: 'image', url: image.url ?? '',
+    ...(image.aeskey ? { aeskey: image.aeskey } : {}),
+  }
+}
+
+function storedRef(kind: 'file' | 'video', media: { url?: string; aeskey?: string; name?: string } | undefined,
+  index: number, label?: string): LiveMediaRef | undefined {
+  if (!media) return undefined
+  return {
+    key: `${kind}_wecom_${index}`, marker: `${label ?? (kind === 'file' ? '[文件]' : '[视频]')} ${kind}_wecom_${index}`,
+    kind, url: media.url ?? '',
+    ...(media.name ? { name: media.name } : {}),
+    ...(media.aeskey ? { aeskey: media.aeskey } : {}),
+  }
+}
 
 /**
  * Extracts the readable parts of a WeCom message.
  *
- * Images become numbered `[图片] img_wecom_N` markers with a reference the runner
- * downloads before the callback URL expires. Files and videos have no readable
- * content here; they become a marker so the agent can ask the person to resend or
- * describe them instead of silently losing the message. A voice message without a
- * transcription keeps a marker for the same reason: WeCom sends only the converted
- * text, never the audio, so silence would otherwise look like a lost message.
+ * Images become numbered `[图片] img_wecom_N` markers, files and videos become
+ * `[文件]/[视频] *_wecom_N` markers; the runner downloads all of them before the
+ * callback URL expires. A quoted message is prefixed as `[引用] …` and its media is
+ * downloaded too. A voice message without a transcription keeps a marker because
+ * WeCom sends only the converted text, never the audio. Nothing is dropped silently.
  */
 export function liveMessageParts(body: LiveMessage): LiveMessageParts {
-  const images: LiveImageRef[] = []
-  if (body.msgtype === 'text') return { text: cleanLiveText(body.text?.content ?? '') || undefined, images }
-  if (body.msgtype === 'voice') {
-    return { text: cleanLiveText(body.voice?.content ?? '') || '[语音消息，企业微信未提供转写文本]', images }
+  const images: LiveMediaRef[] = []
+  const media: LiveMediaRef[] = []
+  const lines: string[] = []
+
+  const quote = body.quote
+  if (quote) {
+    const quoted: string[] = []
+    const quoteText = cleanLiveText(quote.text?.content ?? '')
+    if (quoteText) quoted.push(quoteText)
+    if (quote.msgtype === 'voice') {
+      const voice = cleanLiveText(quote.voice?.content ?? '')
+      quoted.push(voice ? `[引用语音] ${voice}` : '[引用语音]（未提供转写文本）')
+    }
+    for (const item of quote.mixed?.msg_item ?? []) {
+      if (item.msgtype === 'text') {
+        const text = cleanLiveText(item.text?.content ?? '')
+        if (text) quoted.push(text)
+      } else if (item.msgtype === 'image') {
+        const ref = imageRef(item.image, images.length, '[引用图片]')
+        if (ref) { images.push(ref); quoted.push(ref.marker) }
+      }
+    }
+    const quoteImage = imageRef(quote.image, images.length, '[引用图片]')
+    if (quoteImage) { images.push(quoteImage); quoted.push(quoteImage.marker) }
+    for (const kind of ['file', 'video'] as const) {
+      const ref = storedRef(kind, kind === 'file' ? quote.file : quote.video, media.length, `[引用${mediaLabel(kind)}]`)
+      if (ref) { media.push(ref); quoted.push(ref.marker) }
+    }
+    if (quoted.length) lines.push(`[引用] ${quoted.join('\n')}`)
   }
-  if (body.msgtype === 'image') {
-    if (!body.image) return { images }
-    const key = 'img_wecom_0'
-    images.push({ key, url: body.image.url, ...(body.image.aeskey ? { aeskey: body.image.aeskey } : {}) })
-    return { text: `[图片] ${key}`, images }
-  }
-  if (body.msgtype === 'file') return { text: body.file?.name ? `[文件] ${body.file.name}` : '[文件]', images }
-  if (body.msgtype === 'video') return { text: body.video?.name ? `[视频] ${body.video.name}` : '[视频]', images }
-  if (body.msgtype === 'mixed') {
-    const lines: string[] = []
+
+  if (body.msgtype === 'text') {
+    const text = cleanLiveText(body.text?.content ?? '')
+    if (text) lines.push(text)
+  } else if (body.msgtype === 'voice') {
+    const text = cleanLiveText(body.voice?.content ?? '')
+    lines.push(text || '[语音消息，企业微信未提供转写文本]')
+  } else if (body.msgtype === 'image') {
+    const ref = imageRef(body.image, images.length)
+    if (ref) { images.push(ref); lines.push(ref.marker) }
+  } else if (body.msgtype === 'file' || body.msgtype === 'video') {
+    const ref = storedRef(body.msgtype, body.msgtype === 'file' ? body.file : body.video, media.length)
+    if (ref) { media.push(ref); lines.push(ref.marker) }
+  } else if (body.msgtype === 'mixed') {
     for (const item of body.mixed?.msg_item ?? []) {
       if (item.msgtype === 'text') {
         const text = cleanLiveText(item.text?.content ?? '')
         if (text) lines.push(text)
-      } else if (item.msgtype === 'image' && item.image) {
-        const key = `img_wecom_${images.length}`
-        images.push({ key, url: item.image.url, ...(item.image.aeskey ? { aeskey: item.image.aeskey } : {}) })
-        lines.push(`[图片] ${key}`)
+      } else if (item.msgtype === 'image') {
+        const ref = imageRef(item.image, images.length)
+        if (ref) { images.push(ref); lines.push(ref.marker) }
       }
     }
-    return { text: lines.length ? lines.join('\n') : undefined, images }
   }
-  return { images }
+  return { text: lines.length ? lines.join('\n') : undefined, images, media }
 }
 
-/** Extracts only the human-readable text; images are handled by `liveMessageParts`. */
+/** Extracts only the human-readable text; media is handled by `liveMessageParts`. */
 export function liveMessageText(body: LiveMessage): string | undefined {
   return liveMessageParts(body).text
 }
@@ -247,7 +368,7 @@ export function liveTrigger(frame: LiveFrame): Trigger | undefined {
     },
     meta: {
       chatId, userId, reqId: requestId, msgId: body.msgid, chatType: body.chattype, transport: LIVE_TRANSPORT,
-      ...(parts.images.length ? { images: parts.images } : {}),
+      ...(parts.images.length || parts.media.length ? { media: [...parts.images, ...parts.media] } : {}),
     },
   }
 }
@@ -265,8 +386,16 @@ const markdownBody = (content: string): Record<string, unknown> => ({ msgtype: '
 export async function sendLiveReply(message: OutboundMessage): Promise<'sent' | 'gone'> {
   const bot = activeBot
   if (!bot) throw new Error('The WeCom long connection is not ready')
-  const { reqId = '', chatId = '', userId = '', chatType = '' } = message.channel.address
+  const {
+    reqId = '', chatId = '', userId = '', chatType = '', transport = '',
+    topicId = '', postId = '', parentReplyId = '',
+  } = message.channel.address
   const text = checkedImText(message.text)
+  if (transport === LIVE_TOPIC_TRANSPORT) {
+    if (!topicId || !postId) return 'gone'
+    await bot.sendTopicReply({ topicId, postId, ...(parentReplyId ? { parentReplyId } : {}) }, text)
+    return 'sent'
+  }
   const target = chatId || userId
   if (!target) return 'gone'
   pruneCallbacks()
@@ -332,6 +461,29 @@ export function startLive(ctx: SourceContext, config: WecomConfig, signal: Abort
     const detail = String(error).slice(0, 500)
     report(ctx, 'error', detail)
   })
+  try {
+    current.onTopic((frame: LiveFrame) => {
+      chain = chain.then(async () => {
+        if (running.signal.aborted) return
+        if (ctx.config<WecomConfig>(SOURCE)?.mode !== 'live') return
+        const target = topicTarget(frame)
+        if (!target) return
+        const content = target.replyId
+          ? await current.topicReplyContent(target.topicId, target.postId, target.replyId)
+          : await current.topicPost(target.topicId, target.postId)
+        const trigger = liveTopicTrigger(frame, target, content)
+        if (!trigger || seen.has(trigger.id)) return
+        await ctx.receive(trigger)
+        seen.add(trigger.id)
+        if (seen.size > 1000) seen.delete(seen.values().next().value as string)
+      }).catch((error: unknown) => {
+        if (!running.signal.aborted) report(ctx, 'error', String(error).slice(0, 500))
+      })
+    })
+  } catch (error) {
+    // A changed SDK internal only loses channel events; ordinary messages keep working.
+    report(ctx, 'error', String(error).slice(0, 500))
+  }
   current.onMessage((frame: LiveFrame) => {
     chain = chain.then(async () => {
       if (running.signal.aborted) return
@@ -340,8 +492,8 @@ export function startLive(ctx: SourceContext, config: WecomConfig, signal: Abort
       if (!trigger || seen.has(trigger.id)) return
       callbacks.set(String(trigger.meta.reqId ?? ''), Date.now())
       pruneCallbacks()
-      // WeCom image URLs expire in five minutes, so keep the bytes before the Trigger is queued.
-      await prepareLiveImages(ctx, current, trigger, running.signal)
+      // WeCom media URLs expire in five minutes, so keep the bytes before the Trigger is queued.
+      await prepareLiveMedia(ctx, current, trigger, running.signal)
       if (running.signal.aborted) return
       await ctx.receive(trigger)
       seen.add(trigger.id)
