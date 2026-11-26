@@ -4,6 +4,7 @@ import { UserError } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
+import { policyVersion } from '../src/policy.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host | undefined
@@ -98,4 +99,20 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   await expect(settings.sync('feishu')).rejects.toThrow(new UserError('nothingToSync', { source: 'feishu' }))
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
+})
+
+it('saves the People directory as its own block without changing the Policy version or authorization', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  const before = store.settings(), revision = store.blockRevision('people')
+  const value = { people: [
+    { id: 'hailaz', name: 'hailaz', handles: [{ source: 'github', id: 'hailaz' }, { source: 'weixin', id: 'o9cq-owner' }] },
+    { id: 'bob', handles: [{ source: 'github', id: 'bob' }] },
+  ] }
+  expect(await settings.save('people', value, revision, 'panel')).toMatchObject({ saved: true, policy_changed: false })
+  expect(store.settings().people).toEqual(value)
+  expect(store.blockRevision('people')).toBe(revision + 1)
+  expect(policyVersion(store.settings())).toBe(policyVersion(before))
+  expect(settings.block('people')).toMatchObject({ block: 'people', revision: revision + 1, value })
+  expect(settings.view().people).toEqual({ revision: revision + 1, value })
 })

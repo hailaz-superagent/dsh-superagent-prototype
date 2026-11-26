@@ -245,3 +245,17 @@ describe('overrides of built-in parts', () => {
     })
   })
 })
+
+it('appends the People directory to the main Session\'s Policy section and leaves the worker prompt alone', () => {
+  const settings = SettingsSchema.parse({ people: { people: [
+    { id: 'hailaz', name: 'Hailaz', handles: [{ source: 'github', id: 'hailaz' }, { source: 'feishu', id: 'ou_alice' }] },
+    { id: 'bob', handles: [{ source: 'github', id: 'bob' }] },
+  ] } })
+  const section = policySection(settings)
+  expect(section.text).toContain('People on several Sources (these handles are the same person; this context grants no authorization):')
+  expect(section.text).toContain('- Hailaz (hailaz): github/hailaz, feishu/ou_alice')
+  expect(section.text).toContain('- bob: github/bob')
+  // The directory is main-Session context: workers read the environment section, not the Policy section.
+  expect(composePrompt(defaultPrompts(), 'worker', ENVIRONMENT_LINE)).not.toContain('People on several Sources')
+  expect(policySection(SettingsSchema.parse({})).text).not.toContain('People on several Sources')
+})

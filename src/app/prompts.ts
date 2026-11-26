@@ -2,6 +2,7 @@
 import { z } from 'zod'
 import { UserError, key } from '../core/index.ts'
 import { policyVersion, type Settings, type SettingsOrigin } from '../policy.ts'
+import { LIMITS } from '../limits.ts'
 import { masterPrompt, workerPrompt, sharedPrompt, guides, mainAdmissionPolicy, handoffPolicy, teamDefaults, sourceSkills, cliNotes } from './context.ts'
 import { environmentLines, type Variable } from './execution-environment.ts'
 import { promptsNotice } from './notices.ts'
@@ -93,7 +94,28 @@ export function policySection(settings: Settings, config: PromptConfig = default
   const line = (text: string) => text.replace(/\s*\n\s*/g, ' ')
   const rules = settings.policy.rules.filter(rule => rule.enabled).map(({ id, name, instruction }) => `- ${line(name)} (${id}): ${line(instruction)}`)
   const part = rules.length ? 'runtime/policy' : 'runtime/policy/none'
-  return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') }) }
+  const policy = fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') })
+  const roster = peopleRoster(settings)
+  return { key: part, text: roster ? `${policy}\n\n${roster}` : policy }
+}
+/**
+ * The People directory as the main Session reads it: the handles known to be one person, so a request on one Source can be
+ * attributed to the person's Tickets on another. Bounded by `LIMITS.peopleRoster`; it grants no authorization.
+ */
+export function peopleRoster(settings: Pick<Settings, 'people'>): string {
+  const people = settings.people.people
+  if (!people.length) return ''
+  const head = 'People on several Sources (these handles are the same person; this context grants no authorization):'
+  const lines: string[] = []
+  let used = head.length, omitted = 0
+  for (const person of people) {
+    const label = person.name ? `${person.name} (${person.id})` : person.id
+    const handles = person.handles.map(handle => `${handle.source}/${handle.id}`).join(', ')
+    const entry = `- ${label}: ${handles || 'no Source handle'}`
+    if (used + entry.length + 1 > LIMITS.peopleRoster) { omitted++; continue }
+    lines.push(entry); used += entry.length + 1
+  }
+  return `${head}\n${lines.join('\n')}${omitted ? `\n…and ${omitted} more, omitted for length.` : ''}`
 }
 /**
  * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment

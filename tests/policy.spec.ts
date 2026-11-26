@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SettingsSchema, assessmentOutcome, policyEffects, settingsPolicy, policyVersion, allowedSender, anyoneAllowed, type Settings } from '../src/policy.ts'
+import { SettingsSchema, assessmentOutcome, policyEffects, settingsPolicy, policyVersion, allowedSender, anyoneAllowed, personOf, personLabel, type Settings } from '../src/policy.ts'
 import type { MandateBasis } from '../src/core/index.ts'
 import { migrateSettings } from '../src/app/migration.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
@@ -255,6 +255,7 @@ describe('settings migration', () => {
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
       eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },
       executor: { model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
+      people: { people: [] },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)
   })
@@ -482,5 +483,41 @@ describe('bots and events without a sender', () => {
       ['pulls', { listedUnaddressed: false, unlistedAddressed: true, unlistedUnaddressed: false }],
       ['comments', { listedUnaddressed: false, unlistedAddressed: true, unlistedUnaddressed: false }],
       ['ci', { listedUnaddressed: false, unlistedAddressed: false, unlistedUnaddressed: false }]])
+  })
+})
+
+describe('People directory', () => {
+  const directory = SettingsSchema.parse({ people: { people: [
+    { id: 'hailaz', name: 'Hailaz', handles: [{ source: 'github', id: 'hailaz' }, { source: 'feishu', id: MEMBER }] },
+    { id: 'bob', handles: [{ source: 'github', id: 'bob' }] },
+  ] } })
+  it('defaults to no people, and resolves a Source identity to its person without case sensitivity', () => {
+    expect(SettingsSchema.parse({}).people).toEqual({ people: [] })
+    expect(personOf(directory, { source: 'github', id: 'HAILAZ' })?.id).toBe('hailaz')
+    expect(personOf(directory, { source: 'feishu', id: MEMBER })?.id).toBe('hailaz')
+    expect(personOf(directory, { source: 'github', id: 'alice' })).toBeUndefined()
+    expect(personLabel(directory.people.people[0]!)).toBe('Hailaz')
+    // A person without a display name shows its id.
+    expect(personLabel(directory.people.people[1]!)).toBe('bob')
+  })
+  it('rejects duplicate person ids, a handle bound to two people, and malformed entries', () => {
+    expect(() => SettingsSchema.parse({ people: { people: [{ id: 'x', handles: [] }, { id: 'X', handles: [] }] } })).toThrow('Person ids must be unique')
+    expect(() => SettingsSchema.parse({ people: { people: [{ id: 'x', handles: [{ source: 'github', id: 'a' }] },
+      { id: 'y', handles: [{ source: 'github', id: 'a' }] }] } })).toThrow('A Source handle belongs to one person')
+    // Source identities compare without case, so two people cannot claim the same handle in different case.
+    expect(() => SettingsSchema.parse({ people: { people: [{ id: 'x', handles: [{ source: 'github', id: 'Alice' }] },
+      { id: 'y', handles: [{ source: 'github', id: 'alice' }] }] } })).toThrow('A Source handle belongs to one person')
+    expect(() => SettingsSchema.parse({ people: { people: [{ id: 'bad id', handles: [] }] } })).toThrow()
+    expect(() => SettingsSchema.parse({ people: { people: [{ id: 'x', handles: [{ source: 'GitHub', id: 'a' }] }] } })).toThrow()
+    expect(() => SettingsSchema.parse({ people: { people: [{ id: 'x', handles: [{ source: 'github', id: 'a\nb' }] }] } })).toThrow()
+  })
+  it('stays context only: it changes neither the Policy version nor who may originate work', () => {
+    expect(policyVersion(directory)).toBe(policyVersion(SettingsSchema.parse({})))
+    expect(allowedSender(directory, { source: 'github', id: 'hailaz' })).toBeUndefined()
+    const source = new SourceRegistry(() => directory)
+    source.register(githubKind); source.register(feishuKind)
+    expect(settingsPolicy(directory, source).gate(github('hailaz', 'mention'), thread(), []))
+      .toEqual({ admissible: false, reason: 'not_a_member' })
+    expect(anyoneAllowed(directory)).toBe(false)
   })
 })
