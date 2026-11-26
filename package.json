@@ -16,6 +16,7 @@
     "./client": "./lib/client.js",
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
+    "./wecom-watch": "./lib/wecom-watch.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
@@ -57,7 +58,8 @@
   "packageManager": "pnpm@11.7.0",
   "dependencies": {
     "proper-lockfile": "4.1.2",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@wecom/aibot-node-sdk": "1.0.7"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.5-alpha.1",
@@ -120,6 +122,8 @@
     "@deepseek-ai/dsh-client-ui-slots": "0.2.1-alpha.2",
     "react-dom": "18.3.1",
     "@types/react-dom": "18.3.7",
-    "@deepseek-ai/dsh-subprocess": "0.2.1-alpha.2"
+    "@deepseek-ai/dsh-subprocess": "0.2.1-alpha.2",
+    "@types/ws": "8.18.2",
+    "ws": "8.18.3"
   }
 }
