@@ -208,7 +208,7 @@ describe('Weixin protocol', () => {
   })
 
   it('renders Markdown replies as plain WeChat text', () => {
-    expect(plainWeixinText('**完成**：见 [PR #1](https://example.test/1)')).toBe('完成：见 PR #1 (https://example.test/1)')
+    expect(plainWeixinText('**完成**：见 [PR #1](https://example.test/1)')).toBe('完成：见 PR #1 https://example.test/1')
     expect(plainWeixinText('## 标题\n`code`')).toBe('标题\ncode')
   })
 
