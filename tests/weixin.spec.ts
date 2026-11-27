@@ -5,13 +5,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
 import { getUpdates, parseWeixinJson, sendText, type WeixinMessage } from '../src/sources/weixin-api.ts'
 import { downloadWeixinMedia, parseWeixinAesKey, prepareWeixinMedia, weixinImageType, type WeixinMediaRef } from '../src/sources/weixin-media.ts'
 import {
-  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, clearWeixinQuotes, extractWeixinMedia, plainWeixinText, pollWeixinOnce, sendWeixinReply, setWeixinSession, weixinAccountKey,
-  weixinCredentials, weixinKind, weixinMessageParts, weixinThreadId, weixinTrigger, weixinTriggerId,
+  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, cancelWeixinAck, clearWeixinAcks, clearWeixinQuotes, extractWeixinMedia, plainWeixinText, pollWeixinOnce, sendWeixinReply, setWeixinSession, weixinAccountKey,
+  scheduleWeixinAck, weixinCredentials, weixinKind, weixinMessageParts, weixinThreadId, weixinTrigger, weixinTriggerId,
 } from '../src/sources/weixin.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -264,6 +264,23 @@ describe('Weixin protocol', () => {
     expect(readFileSync((received[0]?.meta.images as { file: string }[])[0]!.file)).toEqual(IMAGE)
     expect(state.get(UPDATES_BUF('acct'))).toBe('buf-2')
     expect(state.get(CONTEXT_TOKEN('wx_alice'))).toBe('ctx-1')
+  })
+})
+
+describe('Weixin slow-reply acknowledgement', () => {
+  afterEach(() => vi.useRealTimers())
+  it('sends after the delay and is cancelled by a reply', async () => {
+    vi.useFakeTimers()
+    const sent = vi.fn(async () => 'ok')
+    scheduleWeixinAck('acct:user', sent, 4000)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(sent).toHaveBeenCalledTimes(1)
+    const cancelled = vi.fn(async () => 'ok')
+    scheduleWeixinAck('acct:user', cancelled, 4000)
+    cancelWeixinAck('acct:user')
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(cancelled).not.toHaveBeenCalled()
+    clearWeixinAcks()
   })
 })
 

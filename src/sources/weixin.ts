@@ -15,6 +15,7 @@ import { health, type Health, type SourceContext } from './host.ts'
 import { getUpdates, sendText, STALE_TOKEN_ERRCODE, type WeixinCredentials, type WeixinMessage } from './weixin-api.ts'
 import { prepareWeixinMedia, readWeixinImage, weixinImageKeys, WeixinAccountFileSchema, type WeixinMediaRef } from './weixin-media.ts'
 import { sendWeixinReply } from './weixin-outbound.ts'
+import { clearWeixinAcks, scheduleWeixinAck, cancelWeixinAck } from './weixin-ack.ts'
 import { clearWeixinQuotes, recallQuote, rememberQuote, weixinAccountKey } from './weixin-quotes.ts'
 import { plainWeixinText } from './weixin-text.ts'
 import { pause } from './poll.ts'
@@ -24,6 +25,7 @@ import type { ChannelLink, ContextPart, SourceChannel, SourceKind, SourcePolicyP
 export { SOURCE, weixinThreadId, weixinTriggerId } from './weixin-shared.ts'
 export { DEFAULT_BASE_URL } from './weixin-shared.ts'
 export { clearWeixinQuotes, weixinAccountKey } from './weixin-quotes.ts'
+export { cancelWeixinAck, clearWeixinAcks, scheduleWeixinAck } from './weixin-ack.ts'
 export { STALE_TOKEN_ERRCODE, getUpdates, sendItem, parseWeixinJson, sendText, uploadMedia } from './weixin-api.ts'
 export type { WeixinUpload } from './weixin-api.ts'
 export { extractWeixinMedia, sendWeixinReply } from './weixin-outbound.ts'
@@ -53,6 +55,8 @@ export const WeixinConfigSchema = z.object({
   accountId: z.string().trim().max(128).default(''),
   /** Server-side long-poll hold; the gateway may suggest a different value. */
   pollTimeoutSeconds: z.number().int().min(5).max(120).default(35),
+  /** Seconds before a slow reply sends one "received, working" text; 0 disables it. */
+  ackDelaySeconds: z.number().int().min(0).max(60).default(4),
 }).strict()
 export type WeixinConfig = z.infer<typeof WeixinConfigSchema>
 
@@ -238,6 +242,7 @@ const channel: SourceChannel<WeixinConfig> = {
     if (!active) throw new Error('The Weixin Source is not connected')
     const { userId, contextToken } = message.channel.address
     if (!userId) return 'gone'
+    cancelWeixinAck(`${weixinAccountKey(active)}:${userId}`)
     return sendWeixinReply(active, {
       messageId: message.id, to: userId, text: message.text,
       ...contextToken ? { contextToken } : {},
@@ -286,6 +291,9 @@ export async function pollWeixinOnce(ctx: PollContext, credentials: WeixinCreden
     await prepareWeixinMedia(ctx, trigger, signal)
     if (signal.aborted) return { received }
     await ctx.receive(trigger)
+    if (config.ackDelaySeconds > 0) scheduleWeixinAck(`${account}:${trigger.actor.id}`, () => sendText(credentials, {
+      to: trigger.actor.id, text: '收到，正在处理…', ...message.context_token ? { contextToken: message.context_token } : {},
+    }), config.ackDelaySeconds * 1000)
     received += 1
   }
   // Advance only after every message is ingested; a failed receive is redelivered by the gateway.
@@ -359,6 +367,7 @@ export async function watchWeixin(ctx: SourceContext, signal: AbortSignal): Prom
       }
     }
   } finally {
+    clearWeixinAcks()
     setWeixinSession(undefined)
   }
 }
@@ -398,6 +407,11 @@ export const weixinKind: SourceKind<WeixinConfig> = {
       key: 'pollTimeoutSeconds', type: 'number', advanced: true, min: 5, max: 120,
       label: { zh: '长轮询超时 / 秒', en: 'Long-poll timeout / seconds' },
       hint: { zh: '网关可以建议更合适的值；默认 35 秒。', en: 'The gateway may suggest a better value; defaults to 35 seconds.' },
+    },
+    {
+      key: 'ackDelaySeconds', type: 'number', advanced: true, min: 0, max: 60,
+      label: { zh: '慢回复回执 / 秒', en: 'Slow-reply acknowledgement / seconds' },
+      hint: { zh: '超过这个时间还没有回复时，先发一条“收到，正在处理…”；0 关闭。', en: 'Send one “received, working” text when no reply has gone out after this delay; 0 disables it.' },
     },
   ],
   health: ['weixin'],

@@ -381,6 +381,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/weixin.ts` | The personal WeChat kind: Trigger mapping, quote cache, Policy/scope, Channel, credentials, health and the poll loop |
 | `src/sources/weixin-text.ts` | Personal WeChat plain-text rendering of Markdown replies |
 | `src/sources/weixin-quotes.ts` | The bounded in-process quote cache shared by inbound messages and outbound replies |
+| `src/sources/weixin-ack.ts` | The slow-reply acknowledgement timer, cancelled by a real reply |
 | `src/sources/weixin-outbound.ts` | Outbound WeChat media: local Markdown/`MEDIA:` paths into uploaded image, video, voice and file items |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
