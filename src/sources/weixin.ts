@@ -290,10 +290,11 @@ export async function pollWeixinOnce(ctx: PollContext, credentials: WeixinCreden
     if (message.context_token) ctx.state.set(CONTEXT_TOKEN(trigger.actor.id), message.context_token)
     await prepareWeixinMedia(ctx, trigger, signal)
     if (signal.aborted) return { received }
-    await ctx.receive(trigger)
+    // Schedule before receive: receive can wait for an Eval, and the person should hear something meanwhile.
     if (config.ackDelaySeconds > 0) scheduleWeixinAck(`${account}:${trigger.actor.id}`, () => sendText(credentials, {
       to: trigger.actor.id, text: '收到，正在处理…', ...message.context_token ? { contextToken: message.context_token } : {},
     }), config.ackDelaySeconds * 1000)
+    await ctx.receive(trigger)
     received += 1
   }
   // Advance only after every message is ingested; a failed receive is redelivered by the gateway.
