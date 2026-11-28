@@ -7,7 +7,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
-import { wordCount } from '../src/infra/text.ts'
 import { getUpdates, parseWeixinJson, sendText, type WeixinMessage } from '../src/sources/weixin-api.ts'
 import { downloadWeixinMedia, parseWeixinAesKey, prepareWeixinMedia, weixinImageType, type WeixinMediaRef } from '../src/sources/weixin-media.ts'
 import {
@@ -209,10 +208,10 @@ describe('Weixin protocol', () => {
   })
 
   it('splits a long reply into several messages under the word ceiling', async () => {
-    const long = Array.from({ length: 120 }, (_, index) => `word${index}`).join(' ')
+    const long = '测'.repeat(4_500)
     const chunks = splitWeixinText(long)
     expect(chunks.length).toBeGreaterThan(1)
-    expect(chunks.every(chunk => chunk.length > 0 && wordCount(chunk) <= 100)).toBe(true)
+    expect(chunks.every(chunk => chunk.length > 0 && chunk.length <= 2_000)).toBe(true)
     const sent: Record<string, unknown>[] = []
     const url = await serve((_request, response, body) => { sent.push(JSON.parse(body) as Record<string, unknown>); json(response, { ret: 0 }) })
     setWeixinSession({ baseUrl: url, token: 'secret' })

@@ -100,7 +100,7 @@ export async function sendWeixinReply(credentials: WeixinCredentials, input: {
   let index = 0
   for (const chunk of chunks) {
     const sent = await sendItem(credentials, {
-      to: input.to, item: { type: 1, text_item: { text: checkedImText(chunk) } },
+      to: input.to, item: { type: 1, text_item: { text: chunk } },
       ...input.contextToken ? { contextToken: input.contextToken } : {},
       clientId: clientId(input.messageId, index++), signal,
     })
