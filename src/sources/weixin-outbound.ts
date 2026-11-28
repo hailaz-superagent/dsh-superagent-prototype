@@ -12,7 +12,7 @@ import { basename, extname, isAbsolute } from 'node:path'
 import { checkedImText } from '../infra/text.ts'
 import { sendItem, uploadMedia, type WeixinCredentials, type WeixinUpload } from './weixin-api.ts'
 import { rememberQuote, weixinAccountKey } from './weixin-quotes.ts'
-import { plainWeixinText } from './weixin-text.ts'
+import { plainWeixinText, splitWeixinText } from './weixin-text.ts'
 
 /** One local file a reply names, classified by its extension. */
 export interface WeixinOutboundMedia { kind: 'image' | 'video' | 'voice' | 'file'; file: string; name: string }
@@ -95,15 +95,16 @@ export async function sendWeixinReply(credentials: WeixinCredentials, input: {
   if (!input.to) return 'gone'
   const parts = extractWeixinMedia(input.text)
   const caption = plainWeixinText(parts.text).trim()
+  const chunks = caption ? splitWeixinText(caption) : []
   const account = weixinAccountKey(credentials)
   let index = 0
-  if (caption) {
+  for (const chunk of chunks) {
     const sent = await sendItem(credentials, {
-      to: input.to, item: { type: 1, text_item: { text: checkedImText(caption) } },
+      to: input.to, item: { type: 1, text_item: { text: checkedImText(chunk) } },
       ...input.contextToken ? { contextToken: input.contextToken } : {},
       clientId: clientId(input.messageId, index++), signal,
     })
-    if (sent) rememberQuote(account, input.to, sent, caption)
+    if (sent) rememberQuote(account, input.to, sent, chunk)
   }
   for (const media of parts.media) {
     const data = readFileSync(media.file)
@@ -116,7 +117,7 @@ export async function sendWeixinReply(credentials: WeixinCredentials, input: {
     })
     if (sent) rememberQuote(account, input.to, sent, media.kind === 'image' ? '[图片]' : `[${media.kind}] ${media.name}`)
   }
-  if (!caption && parts.media.length === 0) {
+  if (!chunks.length && parts.media.length === 0) {
     // A reply that became empty still needs a visible body.
     await sendItem(credentials, {
       to: input.to, item: { type: 1, text_item: { text: checkedImText(plainWeixinText(input.text)) } },

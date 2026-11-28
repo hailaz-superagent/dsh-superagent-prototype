@@ -29,7 +29,7 @@ export { cancelWeixinAck, clearWeixinAcks, scheduleWeixinAck } from './weixin-ac
 export { STALE_TOKEN_ERRCODE, getUpdates, sendItem, parseWeixinJson, sendText, uploadMedia } from './weixin-api.ts'
 export type { WeixinUpload } from './weixin-api.ts'
 export { extractWeixinMedia, sendWeixinReply } from './weixin-outbound.ts'
-export { plainWeixinText } from './weixin-text.ts'
+export { plainWeixinText, splitWeixinText } from './weixin-text.ts'
 export type { WeixinCredentials, WeixinMessage } from './weixin-api.ts'
 
 /** Opaque long-poll cursor, per account, so a token or account change starts from a fresh gateway buffer. */

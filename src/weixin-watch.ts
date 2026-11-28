@@ -5,7 +5,7 @@ import { watchWeixin, weixinKind } from './sources/weixin.ts'
 
 export {
   CONTEXT_TOKEN, DEFAULT_BASE_URL, SOURCE, STALE_TOKEN_ERRCODE, UPDATES_BUF, WeixinConfigSchema,
-  cancelWeixinAck, clearWeixinAcks, clearWeixinQuotes, extractWeixinMedia, getUpdates, parseWeixinJson, plainWeixinText, pollWeixinOnce, sendItem, sendText, sendWeixinReply, setWeixinSession, uploadMedia, watchWeixin, weixinAccountKey,
+  cancelWeixinAck, clearWeixinAcks, clearWeixinQuotes, extractWeixinMedia, getUpdates, parseWeixinJson, plainWeixinText, pollWeixinOnce, splitWeixinText, sendItem, sendText, sendWeixinReply, setWeixinSession, uploadMedia, watchWeixin, weixinAccountKey,
   scheduleWeixinAck, weixinCredentials, weixinKind, weixinMessageParts, weixinThreadId, weixinTrigger, weixinTriggerId,
 } from './sources/weixin.ts'
 export type { PollContext, WeixinConfig, WeixinCredentials, WeixinMessage, WeixinUpload } from './sources/weixin.ts'

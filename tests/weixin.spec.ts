@@ -7,10 +7,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
+import { wordCount } from '../src/infra/text.ts'
 import { getUpdates, parseWeixinJson, sendText, type WeixinMessage } from '../src/sources/weixin-api.ts'
 import { downloadWeixinMedia, parseWeixinAesKey, prepareWeixinMedia, weixinImageType, type WeixinMediaRef } from '../src/sources/weixin-media.ts'
 import {
-  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, cancelWeixinAck, clearWeixinAcks, clearWeixinQuotes, extractWeixinMedia, plainWeixinText, pollWeixinOnce, sendWeixinReply, setWeixinSession, weixinAccountKey,
+  CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, cancelWeixinAck, clearWeixinAcks, clearWeixinQuotes, extractWeixinMedia, splitWeixinText, plainWeixinText, pollWeixinOnce, sendWeixinReply, setWeixinSession, weixinAccountKey,
   scheduleWeixinAck, weixinCredentials, weixinKind, weixinMessageParts, weixinThreadId, weixinTrigger, weixinTriggerId,
 } from '../src/sources/weixin.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -205,6 +206,20 @@ describe('Weixin protocol', () => {
     expect(sent).toHaveLength(2)
     expect(sent[0]).toMatchObject({ msg: { item_list: [{ type: 1, text_item: { text: '看图' } }] } })
     expect(sent[1]).toMatchObject({ msg: { item_list: [{ type: 2, image_item: { media: { encrypt_query_param: 'download-param', encrypt_type: 1 }, mid_size: 16 } }] } })
+  })
+
+  it('splits a long reply into several messages under the word ceiling', async () => {
+    const long = Array.from({ length: 120 }, (_, index) => `word${index}`).join(' ')
+    const chunks = splitWeixinText(long)
+    expect(chunks.length).toBeGreaterThan(1)
+    expect(chunks.every(chunk => chunk.length > 0 && wordCount(chunk) <= 100)).toBe(true)
+    const sent: Record<string, unknown>[] = []
+    const url = await serve((_request, response, body) => { sent.push(JSON.parse(body) as Record<string, unknown>); json(response, { ret: 0 }) })
+    setWeixinSession({ baseUrl: url, token: 'secret' })
+    try {
+      await sendWeixinReply({ baseUrl: url, token: 'secret' }, { messageId: 'reply-long', to: 'wx_alice', text: long })
+    } finally { setWeixinSession(undefined) }
+    expect(sent).toHaveLength(chunks.length)
   })
 
   it('renders Markdown replies as plain WeChat text', () => {
