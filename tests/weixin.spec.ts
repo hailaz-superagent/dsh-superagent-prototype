@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
 import { getUpdates, parseWeixinJson, sendText, type WeixinMessage } from '../src/sources/weixin-api.ts'
+import { wavToPcm } from '../src/sources/weixin-audio.ts'
 import { downloadWeixinMedia, parseWeixinAesKey, prepareWeixinMedia, weixinImageType, type WeixinMediaRef } from '../src/sources/weixin-media.ts'
 import {
   CONTEXT_TOKEN, UPDATES_BUF, WeixinConfigSchema, cancelWeixinAck, clearWeixinAcks, clearWeixinQuotes, extractWeixinMedia, splitWeixinText, plainWeixinText, pollWeixinOnce, sendWeixinReply, setWeixinSession, weixinAccountKey,
@@ -219,6 +220,19 @@ describe('Weixin protocol', () => {
       await sendWeixinReply({ baseUrl: url, token: 'secret' }, { messageId: 'reply-long', to: 'wx_alice', text: long })
     } finally { setWeixinSession(undefined) }
     expect(sent).toHaveLength(chunks.length)
+  })
+
+  it('strips a WAV container to PCM for a voice item', () => {
+    const pcm = Buffer.alloc(3200)
+    const header = Buffer.alloc(44)
+    header.write('RIFF', 0, 'ascii'); header.writeUInt32LE(36 + pcm.length, 4); header.write('WAVE', 8, 'ascii')
+    header.write('fmt ', 12, 'ascii'); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22)
+    header.writeUInt32LE(16000, 24); header.writeUInt32LE(32000, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34)
+    header.write('data', 36, 'ascii'); header.writeUInt32LE(pcm.length, 40)
+    const parsed = wavToPcm(Buffer.concat([header, pcm]))
+    expect(parsed?.sampleRate).toBe(16000)
+    expect(parsed?.playtime).toBe(100)
+    expect(parsed?.pcm.length).toBe(pcm.length)
   })
 
   it('renders Markdown replies as plain WeChat text', () => {

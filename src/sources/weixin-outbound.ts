@@ -11,6 +11,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { basename, extname, isAbsolute } from 'node:path'
 import { checkedImText } from '../infra/text.ts'
 import { sendItem, uploadMedia, type WeixinCredentials, type WeixinUpload } from './weixin-api.ts'
+import { wavToPcm } from './weixin-audio.ts'
 import { rememberQuote, weixinAccountKey } from './weixin-quotes.ts'
 import { plainWeixinText, splitWeixinText } from './weixin-text.ts'
 
@@ -66,7 +67,7 @@ export function extractWeixinMedia(input: string): WeixinOutboundParts {
 }
 
 /** The message item shape the gateway expects for one uploaded file. */
-function mediaItem(media: WeixinOutboundMedia, upload: WeixinUpload): Record<string, unknown> {
+function mediaItem(media: WeixinOutboundMedia, upload: WeixinUpload, voice?: { encodeType: number; sampleRate: number; playtime: number }): Record<string, unknown> {
   const ref = {
     media: {
       encrypt_query_param: upload.downloadParam,
@@ -77,7 +78,7 @@ function mediaItem(media: WeixinOutboundMedia, upload: WeixinUpload): Record<str
   }
   if (media.kind === 'image') return { type: 2, image_item: { ...ref, mid_size: upload.cipherSize } }
   if (media.kind === 'video') return { type: 5, video_item: { ...ref, video_size: upload.cipherSize } }
-  if (media.kind === 'voice') return { type: 3, voice_item: { ...ref, encode_type: ENCODE_TYPES[extname(media.file).toLowerCase()] ?? 7 } }
+  if (media.kind === 'voice') return { type: 3, voice_item: { ...ref, encode_type: voice?.encodeType ?? ENCODE_TYPES[extname(media.file).toLowerCase()] ?? 7, ...voice ? { sample_rate: voice.sampleRate, playtime: voice.playtime } : {} } }
   return { type: 4, file_item: { ...ref, file_name: media.name, len: String(upload.rawSize) } }
 }
 
@@ -107,12 +108,18 @@ export async function sendWeixinReply(credentials: WeixinCredentials, input: {
     if (sent) rememberQuote(account, input.to, sent, chunk)
   }
   for (const media of parts.media) {
-    const data = readFileSync(media.file)
+    let data: Buffer = readFileSync(media.file)
+    let filename = media.name
+    let voice: { encodeType: number; sampleRate: number; playtime: number } | undefined
+    if (media.kind === 'voice' && extname(media.file).toLowerCase() === '.wav') {
+      const parsed = wavToPcm(data)
+      if (parsed) { data = parsed.pcm as Buffer; filename = `${media.name.slice(0, -4)}.pcm`; voice = { encodeType: 1, sampleRate: parsed.sampleRate, playtime: parsed.playtime } }
+    }
     const upload = await uploadMedia(credentials, {
-      data, to: input.to, mediaType: mediaType(media.kind), filename: media.name, signal,
+      data, to: input.to, mediaType: mediaType(media.kind), filename, signal,
     })
     const sent = await sendItem(credentials, {
-      to: input.to, item: mediaItem(media, upload), ...input.contextToken ? { contextToken: input.contextToken } : {},
+      to: input.to, item: mediaItem(media, upload, voice), ...input.contextToken ? { contextToken: input.contextToken } : {},
       clientId: clientId(input.messageId, index++), signal,
     })
     if (sent) rememberQuote(account, input.to, sent, media.kind === 'image' ? '[图片]' : `[${media.kind}] ${media.name}`)
